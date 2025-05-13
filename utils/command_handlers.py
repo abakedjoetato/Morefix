@@ -17,7 +17,8 @@ logger = logging.getLogger(__name__)
 
 def command_handler(
     collection_name: Optional[str] = None,
-    operation_type: Optional[str] = None
+    operation_type: Optional[str] = None,
+    guild_only: bool = False
 ):
     """
     Decorator for command handling with proper error handling and logging
@@ -25,6 +26,7 @@ def command_handler(
     Args:
         collection_name: Optional collection name for database operation
         operation_type: Optional operation type for more specific error handling
+        guild_only: Whether the command should only work in guilds
         
     Returns:
         Decorated function

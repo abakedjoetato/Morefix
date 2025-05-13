@@ -84,8 +84,10 @@ async def load_extensions(bot_instance):
         "cogs.player_links",
         # For now, let's keep these disabled until further testing
         # "cogs.premium_new_fixed",  # Premium features
-        "cogs.stats_compat",  # Compatibility version of stats module
-        "cogs.help"           # Fixed - Renamed commands method to commands_command
+        "cogs.stats_fixed",   # Fixed - Renamed stats command to avoid name conflict
+        "cogs.help",          # Fixed - Renamed commands method to commands_command
+        "cogs.setup_fixed",   # Fixed - Added compatibility with py-cord 2.6.1 guild_only
+        "cogs.rivalries_fixed" # Fixed - Added compatibility with py-cord 2.6.1 app_commands
     ]
     
     # Cogs with known issues that need to be fixed or are redundant
@@ -97,9 +99,9 @@ async def load_extensions(bot_instance):
         # "cogs.factions",        # Fixed - Fixed premium_tier_required import path
         "cogs.premium_new",       # Has indentation issues - using fixed version
         "cogs.premium_new_fixed", # Has issues with missing premium_mongodb_models dependencies
-        "cogs.rivalries",         # Has issues with SlashCommand compatibility
-        "cogs.setup",             # Has issues with 'guild_only' attribute
-        "cogs.stats",             # Command name conflict - needs to be fixed
+        "cogs.rivalries",         # Fixed - Added compatibility with py-cord 2.6.1 app_commands
+        "cogs.setup",             # Fixed - Added compatibility with py-cord 2.6.1 guild_only
+        "cogs.stats",             # Fixed - Command name conflict fixed by renaming to game_stats
         "cogs.stats_premium_fix"  # Missing setup function, needs reimplementation
     ]
     

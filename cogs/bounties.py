@@ -213,7 +213,7 @@ class Bounties(commands.Cog):
                 continue
         
         # Send the embed
-        await safely_respond_to_interaction(interaction, embed=embed)
+        await safely_respond_to_interaction(interaction, "", embed=embed)
         
     @command_handler(collection_name="bounties")
     @db_operation(operation_type="create_bounty")
