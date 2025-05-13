@@ -1,36 +1,23 @@
 """
-Compatibility layer for discord.py and py-cord differences
+Discord Compatibility Module for py-cord 2.6.1
 
-This module provides functions and classes to abstract away the differences
-between discord.py and py-cord command system implementations.
+Provides compatibility functions and decorators to work with py-cord 2.6.1
 """
 
 import logging
-from enum import Enum
+import functools
 from typing import Any, Callable, Dict, List, Optional, TypeVar, Union, cast
 
 import discord
-from discord.ext import commands
-
 from utils.command_imports import is_compatible_with_pycord_261
+
+# Import the app_commands module from our patches
+from utils.discord_patches import app_commands
 
 logger = logging.getLogger(__name__)
 
 # Type variables for better type hinting
 CommandT = TypeVar('CommandT', bound=Callable[..., Any])
-FuncT = TypeVar('FuncT', bound=Callable[..., Any])
-
-class AppCommandOptionType(Enum):
-    """Compatible enum for app command option types"""
-    STRING = 3
-    INTEGER = 4
-    BOOLEAN = 5
-    USER = 6
-    CHANNEL = 7
-    ROLE = 8
-    MENTIONABLE = 9
-    NUMBER = 10
-    ATTACHMENT = 11
 
 def command(
     name: Optional[str] = None,
@@ -38,130 +25,98 @@ def command(
     **kwargs: Any
 ) -> Callable[[CommandT], CommandT]:
     """
-    A compatible decorator for creating slash commands.
-    
-    This handles the differences between discord.py's app_commands.command and
-    py-cord's slash_command.
+    Compatibility wrapper for slash command decorators
     
     Args:
         name: The name of the command
         description: The description of the command
-        **kwargs: Additional arguments to pass to the command
+        **kwargs: Additional arguments for the command
         
     Returns:
-        Command decorator function
+        A decorator that converts a function into a slash command
     """
-    def decorator(func: CommandT) -> CommandT:
-        # Handle based on library version
-        if is_compatible_with_pycord_261():
-            # For py-cord 2.6.1, use the discord.commands.slash_command decorator
-            slash_command = commands.slash_command(
-                name=name,
-                description=description,
-                **kwargs
-            )
-            return slash_command(func)
-        else:
-            # For discord.py or other versions, use app_commands.command
-            from utils.discord_patches import app_commands
-            app_command = app_commands.command(
-                name=name,
-                description=description,
-                **kwargs
-            )
-            return app_command(func)
+    # For py-cord 2.6.1, use our app_commands patch
+    if is_compatible_with_pycord_261():
+        return app_commands.command(name=name, description=description, **kwargs)
     
-    return decorator
+    # For discord.py, use the native app_commands
+    try:
+        from discord import app_commands as native_app_commands
+        return native_app_commands.command(name=name, description=description, **kwargs)
+    except ImportError:
+        logger.error("Failed to import discord.app_commands. Falling back to commands.command.")
+        # Fallback to commands.command as a last resort
+        from discord.ext import commands
+        return commands.command(name=name, description=description, **kwargs)
 
 def describe(**kwargs: str) -> Callable[[CommandT], CommandT]:
     """
-    A compatible decorator for describing command parameters.
-    
-    This handles the differences between discord.py's app_commands.describe and
-    py-cord's describe.
+    Compatibility wrapper for describe decorator
     
     Args:
-        **kwargs: Parameter descriptions
+        **kwargs: Parameter name to description mapping
         
     Returns:
-        Command decorator function
+        A decorator that adds descriptions to command parameters
     """
-    def decorator(func: CommandT) -> CommandT:
-        # For py-cord 2.6.1, use commands.describe; otherwise use app_commands.describe
-        if is_compatible_with_pycord_261():
-            return commands.describe(**kwargs)(func)
-        else:
-            from utils.discord_patches import app_commands
-            return app_commands.describe(**kwargs)(func)
+    # For py-cord 2.6.1, use our app_commands patch
+    if is_compatible_with_pycord_261():
+        return app_commands.describe(**kwargs)
     
-    return decorator
-
-def choices(**kwargs: List[Union[str, int, float]]) -> Callable[[CommandT], CommandT]:
-    """
-    A compatible decorator for adding choices to command parameters.
-    
-    This handles the differences between discord.py's app_commands.choices and
-    py-cord's choices.
-    
-    Args:
-        **kwargs: Parameter choices
-        
-    Returns:
-        Command decorator function
-    """
-    def decorator(func: CommandT) -> CommandT:
-        # For py-cord 2.6.1, use commands.choices; otherwise use app_commands.choices
-        if is_compatible_with_pycord_261():
-            return commands.choices(**kwargs)(func)
-        else:
-            from utils.discord_patches import app_commands
-            return app_commands.choices(**kwargs)(func)
-    
-    return decorator
+    # For discord.py, use the native app_commands
+    try:
+        from discord import app_commands as native_app_commands
+        return native_app_commands.describe(**kwargs)
+    except ImportError:
+        logger.error("Failed to import discord.app_commands.describe. Using no-op decorator.")
+        # Return a no-op decorator as fallback
+        def noop_decorator(func: CommandT) -> CommandT:
+            return func
+        return noop_decorator
 
 def guild_only() -> Callable[[CommandT], CommandT]:
     """
-    A compatible decorator for making commands guild-only.
-    
-    This handles the differences between discord.py and py-cord.
+    Compatibility wrapper for guild_only decorator
     
     Returns:
-        Command decorator function
+        A decorator that restricts commands to guilds
     """
-    def decorator(func: CommandT) -> CommandT:
-        # Set attribute that can be checked during command execution
-        setattr(func, "__guild_only__", True)
-        
-        # For py-cord 2.6.1, use commands.guild_only; otherwise use our own implementation
-        if is_compatible_with_pycord_261():
-            return commands.guild_only()(func)
-        else:
-            # For discord.py, we'll handle this in the command_handler
+    # For py-cord 2.6.1, use our app_commands patch
+    if is_compatible_with_pycord_261():
+        return app_commands.guild_only()
+    
+    # For discord.py, use the native app_commands
+    try:
+        from discord import app_commands as native_app_commands
+        return native_app_commands.guild_only()
+    except ImportError:
+        logger.error("Failed to import discord.app_commands.guild_only. Using no-op decorator.")
+        # Return a no-op decorator as fallback
+        def noop_decorator(func: CommandT) -> CommandT:
             return func
-    
-    return decorator
+        return noop_decorator
 
-def autocomplete(
-    **kwargs: Callable[[discord.Interaction, str], Any]
-) -> Callable[[CommandT], CommandT]:
+def choices(**kwargs: List[Union[str, int, float]]) -> Callable[[CommandT], CommandT]:
     """
-    A compatible decorator for adding autocomplete to command parameters.
-    
-    This handles the differences between discord.py's app_commands.autocomplete and
-    py-cord's autocomplete.
+    Compatibility wrapper for choices decorator
     
     Args:
-        **kwargs: Parameter autocomplete functions
+        **kwargs: Parameter name to choices mapping
         
     Returns:
-        Command decorator function
+        A decorator that adds choices to command parameters
     """
-    def decorator(func: CommandT) -> CommandT:
-        # For py-cord 2.6.1, use commands.autocomplete; otherwise use app_commands.autocomplete
-        if is_compatible_with_pycord_261():
-            return commands.autocomplete(**kwargs)(func)
-        else:
-            from utils.discord_patches import app_commands
-            return app_commands.autocomplete(**kwargs)(func)
+    # For py-cord 2.6.1, use our app_commands patch
+    if is_compatible_with_pycord_261():
+        return app_commands.choices(**kwargs)
     
-    return decorator
+    # For discord.py, use the native app_commands
+    try:
+        from discord import app_commands as native_app_commands
+        return native_app_commands.choices(**kwargs)
+    except ImportError:
+        logger.error("Failed to import discord.app_commands.choices. Using no-op decorator.")
+        # Return a no-op decorator as fallback
+        def noop_decorator(func: CommandT) -> CommandT:
+            return func
+        return noop_decorator

@@ -21,6 +21,17 @@ logger = logging.getLogger("main")
 # Load environment variables
 load_dotenv()
 
+# Apply compatibility patches for py-cord 2.6.1
+logger.info("Applying py-cord 2.6.1 compatibility patches...")
+try:
+    from utils.discord_patches import patch_modules
+    patch_success = patch_modules()
+    logger.info(f"Discord patches applied: {patch_success}")
+except Exception as e:
+    logger.error(f"Failed to apply compatibility patches: {e}")
+    logger.error(traceback.format_exc())
+    # Continue anyway - some features might still work
+
 # List of required environment variables
 REQUIRED_ENVS = [
     "DISCORD_TOKEN",

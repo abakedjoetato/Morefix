@@ -1,97 +1,122 @@
 """
-Command Imports Compatibility Detection
+Command import utilities
 
-This module provides utilities for detecting the Discord library version
-and adjusting import behavior accordingly.
+This module provides utility functions for importing commands and determining
+compatibility with different Discord library versions.
 """
 
-import importlib
-import sys
 import logging
-from typing import Any, Optional
+import sys
+import re
+import importlib
+from typing import Any, Callable, Dict, List, Optional, Tuple, TypeVar, Union, cast
 
 logger = logging.getLogger(__name__)
 
-# Discord library version detection
-_DISCORD_VERSION: Optional[str] = None
-_IS_COMPATIBLE_WITH_PYCORD_261: Optional[bool] = None
+def is_compatible_with_pycord_261() -> bool:
+    """
+    Check if we're running with py-cord 2.6.1
+    
+    Returns:
+        bool: True if running with py-cord 2.6.1, False otherwise
+    """
+    # Try to import discord
+    try:
+        import discord
+        # Check if version is 2.6.1
+        version = getattr(discord, "__version__", "unknown")
+        logger.debug(f"Detected Discord library version: {version}")
+        return version == "2.6.1"
+    except ImportError:
+        logger.warning("Could not import discord module")
+        return False
 
 def get_discord_version() -> str:
     """
-    Get the installed Discord library version
+    Get the version of discord library we're using
     
     Returns:
-        The version string of the installed Discord library
+        str: Version of discord library or "unknown" if not found
     """
-    global _DISCORD_VERSION
-    
-    if _DISCORD_VERSION is None:
-        try:
-            discord_module = importlib.import_module("discord")
-            _DISCORD_VERSION = getattr(discord_module, "__version__", "unknown")
-        except (ImportError, AttributeError) as e:
-            logger.warning(f"Failed to get Discord library version: {e}")
-            _DISCORD_VERSION = "unknown"
-    
-    return _DISCORD_VERSION
+    try:
+        import discord
+        return getattr(discord, "__version__", "unknown")
+    except ImportError:
+        return "unknown"
 
-def is_compatible_with_pycord_261() -> bool:
+def import_commands():
     """
-    Check if the installed Discord library is compatible with py-cord 2.6.1
+    Import the appropriate commands module based on the Discord library version
     
     Returns:
-        True if the library is compatible with py-cord 2.6.1, False otherwise
+        module: The commands module
     """
-    global _IS_COMPATIBLE_WITH_PYCORD_261
+    import discord
     
-    if _IS_COMPATIBLE_WITH_PYCORD_261 is None:
-        version = get_discord_version()
-        
-        # Check for py-cord 2.6.1 specifically
-        is_pycord_261 = version == "2.6.1"
-        
-        # Check for module structure specific to py-cord
-        has_slash_command = False
-        try:
-            from discord.ext.commands import slash_command
-            has_slash_command = True
-        except ImportError:
-            pass
-        
-        # Set the compatibility flag based on version and structure
-        _IS_COMPATIBLE_WITH_PYCORD_261 = is_pycord_261 or has_slash_command
-        
-        # Log the detected version and compatibility
-        logger.info(f"Detected Discord library version: {version}")
-        logger.info(f"Compatible with py-cord 2.6.1: {_IS_COMPATIBLE_WITH_PYCORD_261}")
-    
-    return _IS_COMPATIBLE_WITH_PYCORD_261
+    if is_compatible_with_pycord_261():
+        # py-cord has commands as a property of the discord.ext module
+        from discord.ext import commands
+        logger.debug("Using py-cord 2.6.1 commands")
+        return commands
+    else:
+        # discord.py has commands as a property of the discord.ext module
+        from discord.ext import commands
+        logger.debug("Using discord.py commands")
+        return commands
 
-def import_app_commands() -> Any:
+def import_app_commands():
     """
-    Import the appropriate app_commands module based on the installed Discord library
-    
-    This function handles the differences between discord.py and py-cord,
-    allowing code to use app_commands consistently.
+    Import the appropriate app_commands module based on the Discord library version
     
     Returns:
-        The appropriate app_commands module
+        module: The app_commands module (or a compatibility layer)
     """
     if is_compatible_with_pycord_261():
-        # For py-cord 2.6.1, we need to use our patches
-        try:
-            from utils import app_commands_patch
-            return app_commands_patch
-        except ImportError:
-            logger.warning("Failed to import app_commands_patch, falling back to discord.py style")
-    
-    # For discord.py or fallback, use the standard app_commands
-    try:
+        # For py-cord 2.6.1, we use our compatibility layer
+        logger.debug("Using py-cord 2.6.1 app_commands compatibility layer")
+        from utils.app_commands_patch import AppCommandsBridge
+        return AppCommandsBridge()
+    else:
+        # For discord.py, we can use the built-in app_commands
         from discord import app_commands
+        logger.debug("Using discord.py app_commands")
         return app_commands
-    except ImportError:
-        logger.error("Failed to import discord.app_commands. This may cause issues.")
-        # Return a placeholder module as a last resort
-        class PlaceholderAppCommands:
-            pass
-        return PlaceholderAppCommands()
+
+# Type for command function decorators 
+F = TypeVar('F', bound=Callable[..., Any])
+
+def get_command_decorator(guild_only: bool = False) -> Callable[[F], F]:
+    """
+    Get the appropriate command decorator based on the Discord library version
+    
+    Args:
+        guild_only: Whether the command should be guild-only
+        
+    Returns:
+        Callable: The command decorator function
+    """
+    commands = import_commands()
+    
+    if is_compatible_with_pycord_261():
+        # py-cord uses the slash_command decorator
+        def decorator(func: F) -> F:
+            cmd = commands.slash_command(guild_only=guild_only)(func)
+            return cast(F, cmd)
+        return decorator
+    else:
+        # For discord.py, we use the command decorator from app_commands
+        app_commands = import_app_commands()
+        
+        def decorator(func: F) -> F:
+            @app_commands.command()
+            async def wrapper(*args, **kwargs):
+                return await func(*args, **kwargs)
+                
+            # Copy attributes
+            for attr_name in dir(func):
+                if not attr_name.startswith('__'):
+                    setattr(wrapper, attr_name, getattr(func, attr_name))
+                    
+            return cast(F, wrapper)
+            
+        return decorator

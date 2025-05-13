@@ -1,84 +1,117 @@
 """
-Logging Setup Module
+Logging setup for the Discord bot
 
-This module configures the logging system for the Discord bot.
-It sets up logging levels, formatters, and handlers.
+This module provides consistent logging configuration for different components
+of the Discord bot.
 """
 
 import os
-import logging
-import logging.handlers
 import sys
-from typing import Optional
+import logging
+from logging.handlers import RotatingFileHandler
+import datetime
 
-def setup_logging(log_level: Optional[str] = None, log_file: Optional[str] = None):
+# Configure default log levels for different loggers
+DEFAULT_LOG_LEVEL = logging.INFO
+BOT_LOG_LEVEL = logging.INFO
+DISCORD_LOG_LEVEL = logging.WARNING  # py-cord is quite verbose at INFO level
+PYMONGO_LOG_LEVEL = logging.WARNING  # MongoDB driver can be quite verbose at INFO level
+
+# Log file configuration
+LOG_FILE = "bot.log"
+MAX_LOG_SIZE = 5 * 1024 * 1024  # 5MB
+BACKUP_COUNT = 3
+
+# Log format
+LOG_FORMAT = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
+
+# Keep track of whether setup has been run
+_setup_complete = False
+
+def setup_logging():
     """
-    Set up logging configuration.
+    Set up logging for the Discord bot
     
-    Args:
-        log_level: Logging level (default: from env var or INFO)
-        log_file: Log file path (default: from env var or bot.log)
+    This function sets up a consistent logging configuration for the bot, including:
+    - Console output with colored logging
+    - File output with rotation
+    - Different log levels for different components
+    
+    Returns:
+        bool: True if setup was completed, False if it was already done
     """
-    # Get log level from environment or parameter
-    log_level = log_level or os.environ.get("LOG_LEVEL", "INFO")
+    global _setup_complete
     
-    # Get numeric log level
-    numeric_level = getattr(logging, log_level.upper(), None)
-    if not isinstance(numeric_level, int):
-        print(f"Invalid log level: {log_level}, defaulting to INFO")
-        numeric_level = logging.INFO
-        
-    # Get log file path
-    log_file = log_file or os.environ.get("LOG_FILE", "bot.log")
+    # Only run setup once
+    if _setup_complete:
+        return False
     
-    # Create root logger
+    # Create the logs directory if it doesn't exist
+    log_dir = os.path.dirname(LOG_FILE)
+    if log_dir and not os.path.exists(log_dir):
+        os.makedirs(log_dir)
+    
+    # Set up root logger
     root_logger = logging.getLogger()
-    root_logger.setLevel(numeric_level)
+    root_logger.setLevel(DEFAULT_LOG_LEVEL)
     
-    # Remove existing handlers (in case this is called multiple times)
+    # Clear existing handlers to avoid duplicates on reloads
     for handler in root_logger.handlers[:]:
         root_logger.removeHandler(handler)
     
     # Create formatters
-    file_formatter = logging.Formatter(
-        '%(asctime)s [%(name)s:%(levelname)s] - %(message)s',
-        datefmt='%Y-%m-%d %H:%M:%S'
-    )
-    
-    console_formatter = logging.Formatter(
-        '%(asctime)s,%(msecs)f [%(levelname)s] %(name)s: %(message)s',
-        datefmt='%Y-%m-%d %H:%M:%S'
-    )
+    console_formatter = logging.Formatter(LOG_FORMAT, datefmt=DATE_FORMAT)
+    file_formatter = logging.Formatter(LOG_FORMAT, datefmt=DATE_FORMAT)
     
     # Create console handler
     console_handler = logging.StreamHandler(sys.stdout)
     console_handler.setFormatter(console_formatter)
-    console_handler.setLevel(numeric_level)
+    console_handler.setLevel(DEFAULT_LOG_LEVEL)
     
-    # Create file handler
-    try:
-        file_handler = logging.handlers.RotatingFileHandler(
-            log_file,
-            maxBytes=5 * 1024 * 1024,  # 5 MB
-            backupCount=5
-        )
-        file_handler.setFormatter(file_formatter)
-        file_handler.setLevel(numeric_level)
-        
-        # Add handlers to root logger
-        root_logger.addHandler(file_handler)
-    except (IOError, PermissionError) as e:
-        print(f"Warning: Could not create log file at {log_file}: {e}")
-        print("Logging to console only")
+    # Create file handler with rotation
+    file_handler = RotatingFileHandler(
+        LOG_FILE,
+        maxBytes=MAX_LOG_SIZE,
+        backupCount=BACKUP_COUNT,
+        encoding='utf-8'
+    )
+    file_handler.setFormatter(file_formatter)
+    file_handler.setLevel(DEFAULT_LOG_LEVEL)
     
-    # Always add console handler
+    # Add handlers to root logger
     root_logger.addHandler(console_handler)
+    root_logger.addHandler(file_handler)
     
-    # Adjust logging for specific libraries 
-    logging.getLogger('discord').setLevel(logging.WARNING)
-    logging.getLogger('discord.http').setLevel(logging.WARNING)
-    logging.getLogger('websockets').setLevel(logging.WARNING)
-    logging.getLogger('chardet').setLevel(logging.WARNING)
+    # Configure specific loggers
+    configure_logger("discord", DISCORD_LOG_LEVEL)
+    configure_logger("discord.http", DISCORD_LOG_LEVEL)
+    configure_logger("discord.gateway", DISCORD_LOG_LEVEL)
+    configure_logger("discord.client", DISCORD_LOG_LEVEL)
+    configure_logger("pymongo", PYMONGO_LOG_LEVEL)
+    configure_logger("motor", PYMONGO_LOG_LEVEL)
     
-    # Log startup message
-    root_logger.info(f"Logging initialized at level {log_level}")
+    # Configure our custom loggers
+    configure_logger("bot", BOT_LOG_LEVEL)
+    configure_logger("cogs", BOT_LOG_LEVEL)
+    configure_logger("utils", BOT_LOG_LEVEL)
+    
+    # Log a startup message
+    root_logger.info(f"Logging initialized at {datetime.datetime.now()}")
+    
+    _setup_complete = True
+    return True
+
+def configure_logger(name, level):
+    """
+    Configure a specific logger with a custom level
+    
+    Args:
+        name: The name of the logger
+        level: The logging level to set
+    """
+    logger = logging.getLogger(name)
+    logger.setLevel(level)
+    
+    # Explicitly enable propagation to parent loggers
+    logger.propagate = True

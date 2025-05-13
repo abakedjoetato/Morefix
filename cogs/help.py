@@ -6,13 +6,9 @@ import asyncio
 from typing import Optional, Dict, List, Any, cast, Protocol, TypeVar, Union
 
 from discord.ext import commands
-# Use our compatibility layer instead of direct imports
-from utils.app_commands_patch import command as app_commands_command
+# Import from our patched discord module which has app_commands
+from utils.discord_patches import app_commands
 from motor.motor_asyncio import AsyncIOMotorDatabase, AsyncIOMotorCollection
-
-# Create an app_commands namespace for compatibility
-class app_commands:
-    command = app_commands_command
 
 # Define a protocol for PvPBot to handle database access properly
 T = TypeVar('T')

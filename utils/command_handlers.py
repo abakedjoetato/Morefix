@@ -1,158 +1,215 @@
 """
-Command Handlers for py-cord 2.6.1 Compatibility
+Command handler utilities for Discord bot
 
-This module provides enhanced command decorators and handlers that work
-across different versions of py-cord and discord.py.
+This module provides utility functions for handling Discord commands with database operations.
 """
 
-import functools
 import logging
-import traceback
-import inspect
-from typing import Any, Callable, Dict, List, Optional, TypeVar, Union, Type, cast, overload
+import functools
+from typing import Any, Callable, Dict, List, Optional, Union, TypeVar, cast, Coroutine
 
 import discord
 from discord.ext import commands
+from discord import Interaction, InteractionType, Member, User
 
-from utils.command_imports import is_compatible_with_pycord_261
-from utils.interaction_handlers import get_interaction_user, safely_respond_to_interaction
-from utils.safe_mongodb import SafeMongoDBResult, safe_mongo_operation
+from utils.safe_mongodb import SafeMongoDBResult
+from utils.interaction_handlers import respond_to_interaction
 
 logger = logging.getLogger(__name__)
 
-# Type variables for better type hinting
-FuncT = TypeVar('FuncT', bound=Callable[..., Any])
-CommandT = TypeVar('CommandT', bound=Callable[..., Any])
+# Type variable for command functions
+F = TypeVar('F', bound=Callable[..., Coroutine])
 
-async def defer_interaction(interaction_or_ctx: Union[discord.Interaction, commands.Context], ephemeral: bool = False) -> bool:
+def guild_only_command(func: F) -> F:
     """
-    Defer an interaction with py-cord 2.6.1 compatibility
+    Decorator to make a command guild-only
     
     Args:
-        interaction_or_ctx: The interaction or context to defer
-        ephemeral: Whether the response should be ephemeral
+        func: The command function
         
     Returns:
-        bool: True if the interaction was deferred, False otherwise
+        The decorated function
     """
-    try:
-        # Handle interactions
-        if isinstance(interaction_or_ctx, discord.Interaction):
-            if hasattr(interaction_or_ctx, 'response') and interaction_or_ctx.response:
-                if hasattr(interaction_or_ctx.response, 'is_done'):
-                    # Check if already responded to
-                    if interaction_or_ctx.response.is_done():
-                        return False
-                
-                # Defer the interaction
-                await interaction_or_ctx.response.defer(ephemeral=ephemeral)
-                return True
+    @functools.wraps(func)
+    async def wrapper(self, ctx, *args, **kwargs):
+        # Check if this is a guild command
+        guild = None
+        if hasattr(ctx, 'guild'):
+            guild = ctx.guild
         
-        # Handle context objects
-        elif isinstance(interaction_or_ctx, commands.Context):
-            # Context objects don't need deferring in the same way
-            return True
+        # Handle both context and interaction objects
+        if guild is None:
+            # No guild, this is a DM
+            if hasattr(ctx, 'response') and hasattr(ctx.response, 'send_message'):
+                # This is an Interaction
+                await respond_to_interaction(
+                    ctx,
+                    content="This command can only be used in a server, not in DMs.",
+                    ephemeral=True
+                )
+            else:
+                # This is a Context
+                await ctx.send("This command can only be used in a server, not in DMs.")
+            return
             
-        return False
-    except Exception as e:
-        logger.error(f"Error deferring interaction: {e}")
-        return False
+        # Guild exists, continue with command
+        return await func(self, ctx, *args, **kwargs)
+        
+    return cast(F, wrapper)
 
-def command_handler(
+def handle_db_result(
     collection_name: Optional[str] = None,
-    guild_only: bool = False
-) -> Callable[[FuncT], FuncT]:
+    error_message: str = "Failed to perform database operation",
+    success_message: Optional[str] = None,
+    include_error_details: bool = True,
+    send_error_ephemeral: bool = True
+):
     """
-    Decorator for command handlers with enhanced error handling and MongoDB support
+    Decorator for handling database operation results in commands
     
     Args:
-        collection_name: MongoDB collection name to use (None for commands not using DB)
-        guild_only: Whether the command should only be usable in guilds
+        collection_name: Name of the collection for error reporting
+        error_message: Default error message
+        success_message: Optional success message
+        include_error_details: Whether to include error details in the message
+        send_error_ephemeral: Whether to send error messages as ephemeral
         
     Returns:
-        Decorator function
+        The decorator function
     """
-    def decorator(func: FuncT) -> FuncT:
+    def decorator(func: F) -> F:
         @functools.wraps(func)
-        async def wrapper(self, ctx_or_interaction, *args, **kwargs):
-            # Validate guild_only requirement
-            if guild_only:
-                guild = None
-                if isinstance(ctx_or_interaction, discord.Interaction):
-                    guild = ctx_or_interaction.guild
-                elif isinstance(ctx_or_interaction, commands.Context):
-                    guild = ctx_or_interaction.guild
-                
-                if not guild:
-                    await safely_respond_to_interaction(
-                        ctx_or_interaction,
-                        content="This command can only be used in a server.",
-                        ephemeral=True
-                    )
-                    return
-            
+        async def wrapper(self, ctx, *args, **kwargs):
             try:
-                # If the function is a command handler, attach the collection name
-                if collection_name and hasattr(self, 'bot') and hasattr(self.bot, 'db'):
-                    # Add collection as a keyword argument if not already provided
-                    if 'collection' not in kwargs:
-                        db = self.bot.db()
-                        if db:
-                            kwargs['collection'] = db[collection_name]
+                result = await func(self, ctx, *args, **kwargs)
                 
-                # Call the original function
-                return await func(self, ctx_or_interaction, *args, **kwargs)
+                # Handle SafeMongoDBResult
+                if isinstance(result, SafeMongoDBResult):
+                    if result.success:
+                        # Success case
+                        if success_message:
+                            if hasattr(ctx, 'response') and hasattr(ctx.response, 'send_message'):
+                                # This is an Interaction
+                                await respond_to_interaction(
+                                    ctx,
+                                    content=success_message
+                                )
+                            else:
+                                # This is a Context
+                                await ctx.send(success_message)
+                        return result.data
+                    else:
+                        # Error case
+                        error_detail = f": {result.error}" if include_error_details and result.error else ""
+                        full_error = f"{error_message}{error_detail}"
+                        
+                        if hasattr(ctx, 'response') and hasattr(ctx.response, 'send_message'):
+                            # This is an Interaction
+                            await respond_to_interaction(
+                                ctx,
+                                content=full_error,
+                                ephemeral=send_error_ephemeral
+                            )
+                        else:
+                            # This is a Context
+                            await ctx.send(full_error)
+                        return None
+                else:
+                    # Regular result, just return it
+                    return result
+                    
             except Exception as e:
-                # Log the error
-                error_msg = f"Error in command handler {func.__name__}: {str(e)}"
-                logger.error(error_msg)
-                logger.error(traceback.format_exc())
+                logger.error(f"Error in command handler for {func.__name__}: {e}")
                 
-                # Respond to the user with the error
+                # Try to send an error message
                 try:
-                    await safely_respond_to_interaction(
-                        ctx_or_interaction,
-                        content=f"An error occurred: {str(e)}",
-                        ephemeral=True
-                    )
-                except Exception as resp_error:
-                    logger.error(f"Failed to respond with error message: {resp_error}")
-                
+                    error_detail = f": {str(e)}" if include_error_details else ""
+                    full_error = f"{error_message}{error_detail}"
+                    
+                    if hasattr(ctx, 'response') and hasattr(ctx.response, 'send_message'):
+                        # This is an Interaction
+                        await respond_to_interaction(
+                            ctx,
+                            content=full_error,
+                            ephemeral=send_error_ephemeral
+                        )
+                    else:
+                        # This is a Context
+                        await ctx.send(full_error)
+                except Exception as e2:
+                    logger.error(f"Failed to send error message: {e2}")
                 return None
                 
-        return cast(FuncT, wrapper)
-    
+        return cast(F, wrapper)
+        
     return decorator
 
-def db_operation(operation_type: str) -> Callable[[FuncT], FuncT]:
+def create_collection_handler(collection_name: str):
     """
-    Decorator for database operations with enhanced error handling
+    Create a handler for a specific collection
     
     Args:
-        operation_type: Type of database operation (for error logging)
+        collection_name: Name of the collection
         
     Returns:
-        Decorator function
+        A specialized handle_db_result decorator
     """
-    def decorator(func: FuncT) -> FuncT:
-        @functools.wraps(func)
-        async def wrapper(*args, **kwargs):
-            try:
-                # Get the actual operation coroutine
-                coro = func(*args, **kwargs)
-                
-                # Execute the operation safely
-                result = await safe_mongo_operation(coro, operation_type)
-                
-                # Return the SafeMongoDBResult
-                return result
-            except Exception as e:
-                logger.error(f"Error in DB operation {func.__name__}: {str(e)}")
-                logger.error(traceback.format_exc())
-                
-                # Return error result
-                return SafeMongoDBResult.error_result(str(e), operation_type)
-                
-        return cast(FuncT, wrapper)
+    def collection_handler(
+        error_message: str = f"Failed to access {collection_name} data",
+        success_message: Optional[str] = None,
+        include_error_details: bool = True,
+        send_error_ephemeral: bool = True
+    ):
+        return handle_db_result(
+            collection_name=collection_name,
+            error_message=error_message,
+            success_message=success_message,
+            include_error_details=include_error_details,
+            send_error_ephemeral=send_error_ephemeral
+        )
+        
+    return collection_handler
+
+def get_user_from_context(ctx: Union[commands.Context, Interaction]) -> Optional[Union[User, Member]]:
+    """
+    Get the user from a context or interaction
     
-    return decorator
+    Args:
+        ctx: Command context or interaction
+        
+    Returns:
+        The user or member, or None if not found
+    """
+    # For commands.Context, use author
+    if hasattr(ctx, 'author'):
+        return ctx.author
+        
+    # For Interaction, use user
+    if hasattr(ctx, 'user'):
+        return ctx.user
+        
+    # For other types, try other attributes
+    if hasattr(ctx, 'message') and hasattr(ctx.message, 'author'):
+        return ctx.message.author
+        
+    return None
+    
+def get_guild_from_context(ctx: Union[commands.Context, Interaction]) -> Optional[discord.Guild]:
+    """
+    Get the guild from a context or interaction
+    
+    Args:
+        ctx: Command context or interaction
+        
+    Returns:
+        The guild, or None if not found
+    """
+    # Try direct guild attribute
+    if hasattr(ctx, 'guild'):
+        return ctx.guild
+        
+    # For other types, try other attributes
+    if hasattr(ctx, 'message') and hasattr(ctx.message, 'guild'):
+        return ctx.message.guild
+        
+    return None

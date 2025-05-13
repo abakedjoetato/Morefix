@@ -215,7 +215,8 @@ class Bounties(commands.Cog):
         # Send the embed
         await safely_respond_to_interaction(interaction, embed=embed)
         
-    @db_operation(collection_name="bounties")
+    @command_handler(collection_name="bounties")
+    @db_operation(operation_type="create_bounty")
     async def create_bounty(
         self, 
         guild_id: Union[str, int], 
@@ -276,7 +277,8 @@ class Bounties(commands.Cog):
             logger.error(f"Error creating bounty: {e}")
             return SafeMongoDBResult.error_result(str(e), "create_bounty")
     
-    @db_operation(collection_name="bounties")
+    @command_handler(collection_name="bounties")
+    @db_operation(operation_type="get_bounties")
     async def get_bounties(
         self,
         guild_id: Union[str, int],

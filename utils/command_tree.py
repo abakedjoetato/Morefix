@@ -1,273 +1,165 @@
 """
-Command Tree Module for py-cord 2.6.1 Compatibility
+Command Tree Management
 
-This module provides a unified interface for command registration and synchronization,
-handling the differences between py-cord 2.6.1 and other Discord library versions.
+This module provides utilities for managing the command tree in a way that is
+compatible with both py-cord 2.6.1 and discord.py.
 """
 
 import logging
 import traceback
-from typing import Any, Dict, List, Optional, Union, Callable, cast
+from typing import Any, Callable, Dict, List, Optional, TypeVar, Union, cast
 
 import discord
 from discord.ext import commands
 
-from utils.command_imports import (
-    is_compatible_with_pycord_261,
-    PYCORD_261,
-    HAS_APP_COMMANDS
-)
+from utils.command_imports import is_compatible_with_pycord_261
 
 logger = logging.getLogger(__name__)
 
-class CompatibilityCommandTree:
+class CommandTree:
     """
-    Unified command tree interface for py-cord 2.6.1 compatibility
+    A compatibility wrapper for command tree management
     
-    This class provides a consistent interface for registering and syncing
-    commands across different Discord library versions.
+    This provides a common interface for managing the command tree whether
+    using py-cord 2.6.1 or discord.py.
     """
     
     def __init__(self, bot: commands.Bot):
         """
-        Initialize the compatibility command tree
+        Initialize the command tree wrapper
         
         Args:
-            bot: The bot instance
+            bot: The bot to manage the command tree for
         """
         self.bot = bot
-        self._commands = []
         
-        # Store reference to native command tree based on library
-        if is_compatible_with_pycord_261():
-            # py-cord 2.6.1 has tree attribute
-            self._native_tree = getattr(bot, "tree", None)
-        elif HAS_APP_COMMANDS:
-            # discord.py has app_commands.CommandTree
-            self._native_tree = getattr(bot, "tree", None)
+        # Use app_commands in discord.py, direct methods in py-cord
+        if not is_compatible_with_pycord_261():
+            # For discord.py, we need to access app_commands
+            from discord import app_commands
+            self._tree = app_commands.CommandTree(bot) 
+            # Replace the bot's tree with our custom tree
+            bot.tree = self._tree
         else:
-            # Fallback for older versions
-            self._native_tree = None
+            # For py-cord, we can use the bot's command handling directly
+            self._tree = None
             
-        logger.info(f"Initialized command tree with py-cord 2.6.1 compatibility mode: {is_compatible_with_pycord_261()}")
-    
-    def add_command(
-        self, 
-        command: Callable,
-        name: Optional[str] = None,
-        description: Optional[str] = None,
-        guild_ids: Optional[List[int]] = None,
-        **kwargs
-    ) -> Any:
+    async def sync(self, guild_id: Optional[int] = None):
         """
-        Add a command to the command tree
+        Sync the command tree to Discord
         
         Args:
-            command: The command function/coroutine
-            name: Optional name for the command
-            description: Optional description for the command
-            guild_ids: Optional list of guild IDs to register with
-            **kwargs: Additional parameters for the command
+            guild_id: Optional guild ID to sync to (None for global sync)
             
         Returns:
-            The registered command
+            List of synced commands
         """
-        # Default command name is function name
-        command_name = name or getattr(command, "__name__", "unknown_command")
-        
         try:
-            if is_compatible_with_pycord_261():
-                # py-cord 2.6.1 approach
-                if self._native_tree:
-                    logger.debug(f"Registering command {command_name} with py-cord 2.6.1 tree")
-                    
-                    # Check if we need to register to specific guilds
-                    if guild_ids:
-                        # Register to each guild
-                        for guild_id in guild_ids:
-                            try:
-                                guild = discord.Object(id=guild_id)
-                                registered = self._native_tree.command(
-                                    name=command_name,
-                                    description=description or getattr(command, "__doc__", "No description"),
-                                    guild=guild,
-                                    **kwargs
-                                )(command)
-                                self._commands.append(registered)
-                            except Exception as e:
-                                logger.error(f"Error registering guild command {command_name} for guild {guild_id}: {e}")
-                    else:
-                        # Register globally
-                        registered = self._native_tree.command(
-                            name=command_name,
-                            description=description or getattr(command, "__doc__", "No description"),
-                            **kwargs
-                        )(command)
-                        self._commands.append(registered)
-                    
-                    return registered
+            if not is_compatible_with_pycord_261():
+                # For discord.py, use the tree sync method
+                if guild_id:
+                    guild = self.bot.get_guild(guild_id)
+                    if guild:
+                        return await self._tree.sync(guild=guild)
+                    logger.warning(f"Could not find guild with ID {guild_id}")
+                    return []
                 else:
-                    logger.warning("No native command tree found for py-cord 2.6.1")
-            elif HAS_APP_COMMANDS:
-                # discord.py approach
-                if self._native_tree:
-                    logger.debug(f"Registering command {command_name} with discord.py tree")
-                    
-                    # Similar approach to py-cord but with discord.py specifics
-                    if guild_ids:
-                        for guild_id in guild_ids:
-                            registered = self._native_tree.command(
-                                name=command_name,
-                                description=description or getattr(command, "__doc__", "No description"),
-                                guild=discord.Object(id=guild_id),
-                                **kwargs
-                            )(command)
-                            self._commands.append(registered)
-                    else:
-                        registered = self._native_tree.command(
-                            name=command_name,
-                            description=description or getattr(command, "__doc__", "No description"),
-                            **kwargs
-                        )(command)
-                        self._commands.append(registered)
-                    
-                    return registered
-                else:
-                    logger.warning("No native command tree found for discord.py")
+                    return await self._tree.sync()
             else:
-                # Fallback approach for older libraries
-                logger.debug(f"Registering command {command_name} using fallback approach")
-                
-                # Use basic command decorator
-                registered = commands.command(
-                    name=command_name,
-                    description=description or getattr(command, "__doc__", "No description"),
-                    **kwargs
-                )(command)
-                
-                # Add to bot's commands
-                self.bot.add_command(registered)
-                self._commands.append(registered)
-                
-                return registered
+                # For py-cord, use the bot's sync_commands method
+                if guild_id:
+                    return await self.bot.sync_commands(guild_ids=[guild_id])
+                else:
+                    return await self.bot.sync_commands(force=True)
         except Exception as e:
-            logger.error(f"Error registering command {command_name}: {e}")
+            logger.error(f"Error syncing command tree: {e}")
             logger.error(traceback.format_exc())
-            return command
-    
-    async def sync(self, guild: Optional[discord.Guild] = None) -> bool:
+            return []
+            
+    async def add_command(self, command: Any, guild_id: Optional[int] = None):
         """
-        Sync commands to Discord
+        Add a command to the tree
         
         Args:
-            guild: Optional guild to sync to, if None syncs globally
+            command: The command to add
+            guild_id: Optional guild ID to add to (None for global)
             
         Returns:
-            bool: True if sync was successful, False otherwise
+            bool: True if successful, False otherwise
         """
         try:
-            if self._native_tree is None:
-                logger.warning("No native command tree to sync")
-                return False
-                
-            if is_compatible_with_pycord_261():
-                # py-cord 2.6.1 approach
-                logger.info(f"Syncing commands with py-cord 2.6.1 {'to guild' if guild else 'globally'}")
-                
-                # Use the native tree's sync method
-                await self._native_tree.sync(guild=guild)
-                return True
-            elif HAS_APP_COMMANDS:
-                # discord.py approach
-                logger.info(f"Syncing commands with discord.py {'to guild' if guild else 'globally'}")
-                
-                if guild:
-                    await self._native_tree.sync(guild=guild)
-                else:
-                    await self._native_tree.sync()
+            if not is_compatible_with_pycord_261():
+                # For discord.py
+                guild = None
+                if guild_id:
+                    guild = self.bot.get_guild(guild_id)
+                self._tree.add_command(command, guild=guild)
                 return True
             else:
-                # No sync needed for older command systems
-                logger.info("No command sync required for this library version")
+                # For py-cord, commands are automatically added
+                # We just need to sync them
+                if guild_id:
+                    await self.bot.sync_commands(guild_ids=[guild_id])
+                else:
+                    await self.bot.sync_commands()
                 return True
         except Exception as e:
-            logger.error(f"Error syncing commands: {e}")
+            logger.error(f"Error adding command to tree: {e}")
             logger.error(traceback.format_exc())
             return False
 
-
-def create_command_tree(bot: commands.Bot) -> CompatibilityCommandTree:
+def create_command_tree(bot: commands.Bot) -> CommandTree:
     """
-    Create a command tree instance for the bot
+    Create a command tree wrapper for the bot
     
     Args:
-        bot: The bot instance
+        bot: The bot to create a command tree for
         
     Returns:
-        CompatibilityCommandTree: The command tree instance
+        A CommandTree instance
     """
-    return CompatibilityCommandTree(bot)
+    return CommandTree(bot)
 
-
-async def sync_command_tree(
-    bot: commands.Bot,
-    command_tree: CompatibilityCommandTree,
-    guild_ids: Optional[List[int]] = None,
-    sync_global: bool = True
-) -> bool:
+async def sync_commands(bot: commands.Bot, command_tree: Optional[CommandTree] = None, guild_ids: Optional[List[int]] = None) -> List[Any]:
     """
-    Sync commands to Discord using the compatibility command tree
+    Sync the bot's commands with Discord
+    
+    This is a utility function that handles the sync process in a way that
+    works for both py-cord 2.6.1 and discord.py.
     
     Args:
-        bot: The bot instance
-        command_tree: The command tree instance
-        guild_ids: Optional list of guild IDs to sync to
-        sync_global: Whether to sync global commands
+        bot: The bot to sync commands for
+        command_tree: Optional command tree to use (will be created if None)
+        guild_ids: Optional list of guild IDs to sync to (None for global)
         
     Returns:
-        bool: True if sync was successful, False otherwise
+        List of synced commands
     """
     try:
-        # Track success for each sync operation
-        sync_results = []
+        logger.info(f"Syncing commands using py-cord 2.6.1 sync_commands")
         
-        # Sync to specific guilds if provided
+        # Create a command tree if not provided
+        tree = command_tree or create_command_tree(bot)
+        
+        # Sync commands
+        synced_commands = []
+        
         if guild_ids:
+            # Sync to specific guilds
             for guild_id in guild_ids:
-                try:
-                    # Get the guild object
-                    guild = bot.get_guild(guild_id)
-                    
-                    if guild is not None:
-                        # Sync commands to this guild
-                        result = await command_tree.sync(guild=guild)
-                        sync_results.append(result)
-                        
-                        # Get guild name safely
-                        guild_name = getattr(guild, "name", str(guild_id))
-                        logger.info(f"Synced commands to guild {guild_name} ({guild_id})")
-                    else:
-                        logger.warning(f"Could not find guild with ID {guild_id}")
-                        sync_results.append(False)
-                except Exception as e:
-                    logger.error(f"Error syncing commands to guild {guild_id}: {e}")
-                    logger.error(traceback.format_exc())
-                    sync_results.append(False)
-        
-        # Sync globally if requested
-        if sync_global:
-            try:
-                result = await command_tree.sync()
-                sync_results.append(result)
-                logger.info("Application commands synced globally")
-            except Exception as e:
-                logger.error(f"Error syncing commands globally: {e}")
-                logger.error(traceback.format_exc())
-                sync_results.append(False)
+                logger.info(f"Syncing commands to guild {guild_id}")
+                guild_commands = await tree.sync(guild_id=guild_id)
+                if guild_commands:
+                    synced_commands.extend(guild_commands)
+        else:
+            # Global sync
+            logger.info("Syncing global commands")
+            global_commands = await tree.sync()
+            if global_commands:
+                synced_commands.extend(global_commands)
                 
-        # Overall success if at least one sync operation succeeded
-        return any(sync_results) if sync_results else False
+        return synced_commands
     except Exception as e:
-        logger.error(f"Error in sync_command_tree: {e}")
+        logger.error(f"Error in sync_commands: {e}")
         logger.error(traceback.format_exc())
-        return False
+        return []

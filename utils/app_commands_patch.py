@@ -1,144 +1,181 @@
 """
-App Commands Patch for py-cord 2.6.1
+app_commands compatibility for py-cord 2.6.1
 
-This module provides a compatibility layer for app_commands functionality
-when using py-cord 2.6.1, which doesn't provide the app_commands module
-in the same way as discord.py.
+This module provides a compatibility layer for app_commands functionality,
+which is implemented differently in discord.py vs py-cord 2.6.1.
 """
 
 import inspect
 import logging
-from enum import Enum
-from typing import Any, Callable, Dict, List, Optional, TypeVar, Union, cast
+import functools
+from typing import Any, Callable, Dict, List, Optional, Tuple, TypeVar, Union, cast, overload, get_type_hints
 
 import discord
 from discord.ext import commands
 
 logger = logging.getLogger(__name__)
 
-# Type variables for better type hinting
+# Type variables for command function typing
 CommandT = TypeVar('CommandT', bound=Callable[..., Any])
+T = TypeVar('T')
 
-class CommandType(Enum):
+class AppCommandsBridge:
     """
-    Compatible enum for command types
+    A bridge class that mimics discord.py's app_commands module for py-cord 2.6.1
+    """
     
-    Mirrors discord.py's app_commands.CommandType
-    """
-    CHAT_INPUT = 1
-    USER = 2
-    MESSAGE = 3
-
-class AppCommandOptionType(Enum):
-    """
-    Compatible enum for app command option types
-    
-    Mirrors discord.py's app_commands.AppCommandOptionType
-    """
-    SUBCOMMAND = 1
-    SUBCOMMAND_GROUP = 2
-    STRING = 3
-    INTEGER = 4
-    BOOLEAN = 5
-    USER = 6
-    CHANNEL = 7
-    ROLE = 8
-    MENTIONABLE = 9
-    NUMBER = 10
-    ATTACHMENT = 11
-
-def command(
-    name: Optional[str] = None,
-    description: Optional[str] = None,
-    **kwargs: Any
-) -> Callable[[CommandT], CommandT]:
-    """
-    A compatibility wrapper for app_commands.command
-    
-    Args:
-        name: The name of the command
-        description: The description of the command
-        **kwargs: Additional arguments for the command
+    def __init__(self):
+        """Initialize the bridge"""
+        pass
         
-    Returns:
-        A decorator that converts a function into an application command
-    """
-    def decorator(func: CommandT) -> CommandT:
-        # Extract the name from the function if not provided
-        command_name = name or func.__name__
-        command_description = description or (func.__doc__ or "No description provided")
+    def command(
+        self, 
+        *, 
+        name: Optional[str] = None, 
+        description: Optional[str] = None
+    ) -> Callable[[CommandT], CommandT]:
+        """
+        Decorator to create a slash command
         
-        # Use slash_command from discord.ext.commands
-        slash_command = commands.slash_command(
-            name=command_name,
-            description=command_description,
-            **kwargs
-        )
+        Args:
+            name: Name of the command
+            description: Description of the command
+            
+        Returns:
+            Decorator function
+        """
+        def decorator(func: CommandT) -> CommandT:
+            # Use py-cord's slash_command decorator underneath
+            cmd = commands.slash_command(
+                name=name,
+                description=description or "No description provided"
+            )(func)
+            
+            # Store the original function for reference
+            setattr(cmd, "_original_function", func)
+            
+            return cast(CommandT, cmd)
+            
+        return decorator
         
-        # Apply the decorator
-        return slash_command(func)
-    
-    return decorator
+    def describe(self, **kwargs) -> Callable[[CommandT], CommandT]:
+        """
+        Decorator to add descriptions to parameters
+        
+        Args:
+            **kwargs: Parameter name to description mapping
+            
+        Returns:
+            Decorator function
+        """
+        def decorator(func: CommandT) -> CommandT:
+            # Store parameter descriptions for later use by slash command creation
+            if not hasattr(func, "__parameter_descriptions__"):
+                setattr(func, "__parameter_descriptions__", {})
+                
+            param_desc = getattr(func, "__parameter_descriptions__")
+            param_desc.update(kwargs)
+            
+            return func
+            
+        return decorator
+        
+    def choices(self, **kwargs) -> Callable[[CommandT], CommandT]:
+        """
+        Decorator to add choices to parameters
+        
+        Args:
+            **kwargs: Parameter name to choices mapping
+            
+        Returns:
+            Decorator function
+        """
+        def decorator(func: CommandT) -> CommandT:
+            # Store parameter choices for later use by slash command creation
+            if not hasattr(func, "__parameter_choices__"):
+                setattr(func, "__parameter_choices__", {})
+                
+            param_choices = getattr(func, "__parameter_choices__")
+            
+            # Process each parameter's choices
+            for param_name, choices_list in kwargs.items():
+                # Convert to py-cord's choice format if needed
+                processed_choices = []
+                
+                for choice in choices_list:
+                    if isinstance(choice, tuple) and len(choice) == 2:
+                        # Already in (name, value) format
+                        processed_choices.append(choice)
+                    else:
+                        # Convert single value to (str(value), value) format
+                        processed_choices.append((str(choice), choice))
+                        
+                param_choices[param_name] = processed_choices
+                
+            return func
+            
+        return decorator
+        
+    def autocomplete(self, **kwargs) -> Callable[[CommandT], CommandT]:
+        """
+        Decorator to add autocomplete to parameters
+        
+        Args:
+            **kwargs: Parameter name to autocomplete function mapping
+            
+        Returns:
+            Decorator function
+        """
+        def decorator(func: CommandT) -> CommandT:
+            # Store parameter autocomplete for later use by slash command creation
+            if not hasattr(func, "__parameter_autocomplete__"):
+                setattr(func, "__parameter_autocomplete__", {})
+                
+            param_autocomplete = getattr(func, "__parameter_autocomplete__")
+            param_autocomplete.update(kwargs)
+            
+            return func
+            
+        return decorator
 
-def describe(**kwargs: str) -> Callable[[CommandT], CommandT]:
-    """
-    A compatibility wrapper for app_commands.describe
-    
-    Args:
-        **kwargs: Parameter name to description mapping
-        
-    Returns:
-        A decorator that adds descriptions to command parameters
-    """
-    def decorator(func: CommandT) -> CommandT:
-        # Use commands.describe from discord.ext
-        return commands.describe(**kwargs)(func)
-    
-    return decorator
+# Create a single instance of the bridge for easy importing
+app_commands_bridge = AppCommandsBridge()
 
-def choices(**kwargs: List[Union[str, int, float]]) -> Callable[[CommandT], CommandT]:
-    """
-    A compatibility wrapper for app_commands.choices
-    
-    Args:
-        **kwargs: Parameter name to choices mapping
-        
-    Returns:
-        A decorator that adds choices to command parameters
-    """
-    def decorator(func: CommandT) -> CommandT:
-        # Use commands.choices from discord.ext
-        return commands.choices(**kwargs)(func)
-    
-    return decorator
+# Export the command function directly for easier importing
+command = app_commands_bridge.command
 
-def guild_only() -> Callable[[CommandT], CommandT]:
+# Compatibility classes for Choice
+class Choice:
     """
-    A compatibility wrapper for app_commands.guild_only
-    
-    Returns:
-        A decorator that restricts commands to guilds
+    Compatibility class for app_commands.Choice in discord.py
     """
-    def decorator(func: CommandT) -> CommandT:
-        # Use commands.guild_only from discord.ext
-        return commands.guild_only()(func)
     
-    return decorator
-
-def autocomplete(
-    **kwargs: Callable[[discord.Interaction, str], Any]
-) -> Callable[[CommandT], CommandT]:
-    """
-    A compatibility wrapper for app_commands.autocomplete
-    
-    Args:
-        **kwargs: Parameter name to autocomplete function mapping
+    def __init__(self, name: str, value: Any):
+        """
+        Initialize a choice
         
-    Returns:
-        A decorator that adds autocomplete to command parameters
-    """
-    def decorator(func: CommandT) -> CommandT:
-        # Use commands.autocomplete from discord.ext
-        return commands.autocomplete(**kwargs)(func)
-    
-    return decorator
+        Args:
+            name: Display name of the choice
+            value: Value of the choice
+        """
+        self.name = name
+        self.value = value
+        
+    def __str__(self):
+        return self.name
+        
+    # Make the Choice class look like a tuple for compatibility
+    def __getitem__(self, idx):
+        if idx == 0:
+            return self.name
+        elif idx == 1:
+            return self.value
+        raise IndexError("Choice index out of range")
+        
+    # Make Choice instances comparable
+    def __eq__(self, other):
+        if isinstance(other, Choice):
+            return self.name == other.name and self.value == other.value
+        elif isinstance(other, tuple) and len(other) == 2:
+            return self.name == other[0] and self.value == other[1]
+        return False
