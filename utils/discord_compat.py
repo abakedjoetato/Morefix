@@ -151,3 +151,72 @@ def is_guild_only(command: Any) -> bool:
                 return True
                 
     return False
+
+# Command decorator compatibility
+def command(*args, **kwargs):
+    """Unified command decorator that works across Discord library versions
+    
+    This function provides a consistent interface for command registration
+    that works with both discord.py and py-cord 2.6.1+.
+    
+    Args:
+        *args: Positional arguments to pass to the command decorator
+        **kwargs: Keyword arguments to pass to the command decorator
+        
+    Returns:
+        Function that registers a command
+    """
+    if is_pycord_261_or_later():
+        # For py-cord 2.6.1+, use app_commands.command
+        from utils.discord_patches import app_commands
+        return app_commands.command(*args, **kwargs)
+    else:
+        # For older versions, use discord.ext.commands
+        from discord.ext import commands
+        return commands.command(*args, **kwargs)
+
+# describe decorator compatibility
+def describe(**kwargs):
+    """Unified describe decorator that works across Discord library versions
+    
+    This function provides a consistent interface for command parameter descriptions
+    that works with both discord.py and py-cord 2.6.1+.
+    
+    Args:
+        **kwargs: Parameter descriptions
+        
+    Returns:
+        Function that adds descriptions to a command
+    """
+    if is_pycord_261_or_later():
+        # For py-cord 2.6.1+, use app_commands.describe
+        from utils.discord_patches import app_commands
+        return app_commands.describe(**kwargs)
+    else:
+        # For older versions, this might be a no-op or use a different mechanism
+        def decorator(func):
+            # Store descriptions for potential use by help commands
+            if not hasattr(func, "_parameter_descriptions"):
+                func._parameter_descriptions = {}
+            func._parameter_descriptions.update(kwargs)
+            return func
+        return decorator
+
+# guild_only decorator compatibility
+def guild_only():
+    """Unified guild_only decorator that works across Discord library versions
+    
+    This function provides a consistent interface for marking commands as guild-only
+    that works with both discord.py and py-cord 2.6.1+.
+    
+    Returns:
+        Function that marks a command as guild-only
+    """
+    if is_pycord_261_or_later():
+        # For py-cord 2.6.1+, use app_commands.guild_only
+        from utils.discord_patches import app_commands
+        return app_commands.guild_only()
+    else:
+        # For older versions, use discord.ext.commands.guild_only
+        from discord.ext import commands
+        return commands.guild_only()

@@ -21,7 +21,69 @@ from utils.csv_parser import CSVParser
 from utils.premium_verification import premium_feature_required  # Use standardized premium verification
 from utils.discord_utils import server_id_autocomplete, hybrid_send
 from utils.discord_compat import guild_only as discord_compat_guild_only
+from utils.interaction_handlers import safely_respond_to_interaction
 from config import PREMIUM_TIERS
+
+async def confirm(ctx, message, ephemeral=False):
+    """
+    Send a confirmation message and wait for user response
+    
+    Args:
+        ctx: Command context or interaction
+        message: Message to display
+        ephemeral: Whether the message should be ephemeral
+        
+    Returns:
+        bool: True if confirmed, False if cancelled or timed out
+    """
+    # Create confirm/cancel buttons
+    class ConfirmView(discord.ui.View):
+        def __init__(self):
+            super().__init__(timeout=60.0)
+            self.value = None
+            
+        @discord.ui.button(label="Confirm", style=discord.ButtonStyle.green)
+        async def confirm(self, interaction, button):
+            if interaction.user != ctx.user:
+                await interaction.response.send_message("You cannot use this confirmation dialog.", ephemeral=True)
+                return
+                
+            self.value = True
+            self.stop()
+            
+        @discord.ui.button(label="Cancel", style=discord.ButtonStyle.red)
+        async def cancel(self, interaction, button):
+            if interaction.user != ctx.user:
+                await interaction.response.send_message("You cannot use this confirmation dialog.", ephemeral=True)
+                return
+                
+            self.value = False
+            self.stop()
+            
+    view = ConfirmView()
+    
+    # Send the confirmation message
+    if hasattr(ctx, 'followup') and hasattr(ctx.followup, 'send'):
+        msg = await ctx.followup.send(message, view=view, ephemeral=ephemeral)
+    elif hasattr(ctx, 'send'):
+        msg = await ctx.send(message, view=view, ephemeral=ephemeral)
+    else:
+        # Last resort - try to use safely_respond_to_interaction
+        await safely_respond_to_interaction(ctx, content=message, view=view, ephemeral=ephemeral)
+        msg = None  # We don't have a message reference for this case
+        
+    # Wait for confirmation
+    await view.wait()
+    
+    # Clean up the message if possible
+    if msg is not None and hasattr(msg, 'edit'):
+        try:
+            await msg.edit(view=None)
+        except Exception:
+            # Ignore errors during cleanup
+            pass
+            
+    return view.value
 
 logger = logging.getLogger(__name__)
 

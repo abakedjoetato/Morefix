@@ -1233,7 +1233,7 @@ async def start_events_monitor(bot, guild_id: int, server_id: str):
 
     try:
         # Get server data
-        server = await Server.get_by_id(bot.db, server_id, guild_id)
+        server = await Server.get_by_id(bot.db, server_id, str(guild_id))
         if server is None:
             logger.error(f"Server {server_id} not found in guild {guild_id}")
             return
@@ -1290,18 +1290,29 @@ async def start_events_monitor(bot, guild_id: int, server_id: str):
         else:
             # Create new connection
             # Look for original numeric server ID for correct path construction
-            original_server_id = server.original_server_id if hasattr(server, 'original_server_id') and server.original_server_id else server.get('server_id')
+            server_id = getattr(server, 'server_id', None)
+            
+            # First try to get from original_server_id attribute if it exists
+            if hasattr(server, 'original_server_id') and getattr(server, 'original_server_id', None):
+                original_server_id = server.original_server_id
+            # Then try dictionary-style access if supported
+            elif hasattr(server, 'get') and callable(getattr(server, 'get')):
+                original_server_id = server.get('server_id', server_id)
+            # Default to server_id attribute
+            else:
+                original_server_id = server_id
             
             # If server ID looks like a UUID format but we don't have an original_server_id,
             # Try to extract a numeric ID from server name or other fields if available
-            if "-" in server.server_id and len(server.server_id) > 30 and original_server_id == server.get('server_id'):
-                logger.info(f"Server ID appears to be in UUID format: {server.get('server_id')}")
+            if server_id and "-" in server_id and len(server_id) > 30 and original_server_id == server_id:
+                logger.info(f"Server ID appears to be in UUID format: {server_id}")
                 logger.info(f"Checking for numeric server ID in server properties")
                 
                 # Try to find a numeric ID in server name or other properties
-                if hasattr(server, 'server_name') and server.server_name:
+                server_name = getattr(server, 'server_name', '') if hasattr(server, 'server_name') else ''
+                if server_name:
                     # Try to extract a numeric ID from the server name
-                    for word in str(server.server_name).split():
+                    for word in str(server_name).split():
                         if word.isdigit() and len(word) >= 4:
                             logger.info(f"Found potential numeric server ID in server_name: {word}")
                             original_server_id = word
@@ -1616,7 +1627,7 @@ async def start_events_monitor(bot, guild_id: int, server_id: str):
         try:
             guild = bot.get_guild(guild_id)
             if guild is not None:
-                server = await Server.get_by_id(bot.db, server_id, guild_id)
+                server = await Server.get_by_id(bot.db, server_id, str(guild_id))
                 if server is not None and server.events_channel_id:
                     try:
                         # Ensure channel ID is an integer

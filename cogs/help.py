@@ -3,6 +3,7 @@
 import discord
 import logging
 import asyncio
+import inspect
 from typing import Optional, Dict, List, Any, cast, Protocol, TypeVar, Union
 
 from discord.ext import commands
@@ -350,11 +351,12 @@ class Help(commands.Cog):
             user_id = interaction.user.id if interaction.user else 0
             view = CommandsView(self.bot, user_id, guild_id)
 
-            # Check if embed is a coroutine (shouldn't happen but let's be safe)
+            # Check if embed is a coroutine or awaitable (shouldn't happen but let's be safe)
             try:
-                if hasattr(embed, '__await__'):
+                # In Pycord 2.6.1, Embed is not an awaitable, so we need to handle this safely
+                if inspect.isawaitable(embed):
                     try:
-                        embed = await embed  # Await the coroutine
+                        embed = await embed  # Await the coroutine if it's actually awaitable
                     except Exception as e:
                         # Use bot.logger if self.logger is not defined
                         logger = getattr(self, 'logger', getattr(self.bot, 'logger', None))

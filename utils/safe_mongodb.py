@@ -53,13 +53,26 @@ def get_database() -> Optional[Database]:
 class SafeMongoDBResult:
     """Wrapper class for MongoDB operation results with safer access methods"""
     
-    def __init__(self, raw_result: Union[InsertOneResult, UpdateResult, DeleteResult, Any]):
+    def __init__(self, 
+                raw_result: Union[InsertOneResult, UpdateResult, DeleteResult, Any] = None,
+                success: bool = None,
+                data: Any = None,
+                error_message: str = None,
+                exception: Exception = None):
         """Initialize with a raw MongoDB result
         
         Args:
             raw_result: Raw result from MongoDB operation
+            success: Whether the operation was successful (manual override)
+            data: Result data (for compatibility)
+            error_message: Error message if operation failed
+            exception: Exception if operation failed
         """
         self._raw_result = raw_result
+        self._success = success
+        self._data = data
+        self._error_message = error_message
+        self._exception = exception
         
     @property
     def acknowledged(self) -> bool:
@@ -163,6 +176,89 @@ class SafeMongoDBResult:
     def __repr__(self) -> str:
         """Detailed representation"""
         return f"SafeMongoDBResult({repr(self._raw_result)})"
+        
+    # Compatibility methods for older pattern with .success and .error properties
+    
+    @property
+    def success(self) -> bool:
+        """Whether the operation was successful
+        
+        Returns:
+            bool: True if successful, False otherwise
+        """
+        if self._success is not None:
+            return self._success
+        return self.is_success()
+    
+    @property
+    def data(self) -> Any:
+        """Get the operation data
+        
+        Returns:
+            Any: Operation data
+        """
+        if self._data is not None:
+            return self._data
+        return self._raw_result
+    
+    @property
+    def error(self) -> Optional[str]:
+        """Get the error message if operation failed
+        
+        Returns:
+            Optional[str]: Error message or None if successful
+        """
+        if self._error_message:
+            return self._error_message
+        if self._exception:
+            return str(self._exception)
+        if not self.success:
+            return "Unknown error occurred"
+        return None
+        
+    @property
+    def result(self) -> Any:
+        """Alias for data property for backward compatibility
+        
+        Returns:
+            Any: Operation result data
+        """
+        return self.data
+        
+    # Factory methods for creating results
+    
+    @classmethod
+    def success_result(cls, data: Any = None) -> 'SafeMongoDBResult':
+        """Create a success result
+        
+        Args:
+            data: Operation result data
+            
+        Returns:
+            SafeMongoDBResult: Success result
+        """
+        return cls(success=True, data=data)
+    
+    @classmethod
+    def error_result(cls, error_message: str = None, exception: Exception = None) -> 'SafeMongoDBResult':
+        """Create an error result
+        
+        Args:
+            error_message: Error message
+            exception: Exception that occurred
+            
+        Returns:
+            SafeMongoDBResult: Error result
+        """
+        return cls(success=False, error_message=error_message, exception=exception)
+        
+    def __bool__(self) -> bool:
+        """Allow direct boolean checks: `if result:`
+        
+        Returns:
+            bool: True if successful, False otherwise
+        """
+        return self.success
 
 class SafeDocument:
     """Base class for MongoDB document models with safe operations"""
@@ -193,12 +289,53 @@ class SafeDocument:
             raise RuntimeError("MongoDB database not initialized. Call set_database() first.")
         return db
         
+    @classmethod
+    def get_collection(cls, db: Optional[Database] = None) -> Collection:
+        """Get the MongoDB collection for this document type with safer access pattern
+        
+        Args:
+            db: Optional database instance (uses default if None)
+            
+        Returns:
+            Collection: MongoDB collection
+            
+        Raises:
+            RuntimeError: If database is not initialized
+        """
+        if db is None:
+            db = cls.get_database()
+            
+        # Try different access patterns for compatibility with different MongoDB drivers
+        try:
+            # First try dictionary-style access (common in Motor)
+            if hasattr(db, '__getitem__'):
+                return db[cls.collection_name]
+        except (TypeError, KeyError, AttributeError):
+            pass
+            
+        # Try property or method access (common in some PyMongo versions)
+        if hasattr(db, cls.collection_name):
+            collection = getattr(db, cls.collection_name)
+            if callable(collection):
+                return collection()
+            return collection
+            
+        # Try get_collection method (common in both)
+        if hasattr(db, 'get_collection'):
+            return db.get_collection(cls.collection_name)
+            
+        # Fall back to dictionary-style access and let it raise appropriate error if it fails
+        return db[cls.collection_name]
+        
     def to_dict(self) -> Dict[str, Any]:
         """Convert document to dictionary for MongoDB storage
         
         Returns:
             Dict[str, Any]: Document as dictionary
         """
+        # Import here to avoid circular imports
+        from utils.mongo_compat import safe_serialize_for_mongodb
+        
         # Get all instance attributes
         result = {}
         for key, value in self.__dict__.items():
@@ -206,8 +343,8 @@ class SafeDocument:
             if key.startswith('_') and key != '_id':
                 continue
                 
-            # Include all other attributes
-            result[key] = value
+            # Include all other attributes with serialization handling
+            result[key] = safe_serialize_for_mongodb(value)
             
         return result
         
@@ -221,7 +358,22 @@ class SafeDocument:
         Returns:
             Document instance
         """
-        return cls(**data)
+        # Import here to avoid circular imports
+        from utils.mongo_compat import safe_deserialize_from_mongodb
+        
+        # Handle None data
+        if data is None:
+            return cls()
+            
+        # Create a copy of data to avoid modifying the original
+        processed_data = {}
+        
+        # Process the data with MongoDB compatibility handling
+        for key, value in data.items():
+            processed_data[key] = safe_deserialize_from_mongodb(value)
+            
+        # Create the object with the processed data
+        return cls(**processed_data)
         
     async def save(self) -> bool:
         """Save document to MongoDB
@@ -231,7 +383,7 @@ class SafeDocument:
         """
         try:
             db = self.get_database()
-            collection = db[self.collection_name]
+            collection = self.get_collection(db)
             
             document_dict = self.to_dict()
             
@@ -257,7 +409,7 @@ class SafeDocument:
         """
         try:
             db = self.get_database()
-            collection = db[self.collection_name]
+            collection = self.get_collection(db)
             
             result = await collection.delete_one({"_id": self._id})
             
@@ -283,7 +435,7 @@ class SafeDocument:
             
         try:
             db = cls.get_database()
-            collection = db[cls.collection_name]
+            collection = cls.get_collection(db)
             
             result = await collection.find_one({"_id": doc_id})
             if result:
@@ -302,7 +454,7 @@ class SafeDocument:
         """
         try:
             db = cls.get_database()
-            collection = db[cls.collection_name]
+            collection = cls.get_collection(db)
             
             cursor = collection.find({})
             documents = []
@@ -327,7 +479,7 @@ class SafeDocument:
         """
         try:
             db = cls.get_database()
-            collection = db[cls.collection_name]
+            collection = cls.get_collection(db)
             
             cursor = collection.find(query)
             documents = []
@@ -352,7 +504,7 @@ class SafeDocument:
         """
         try:
             db = cls.get_database()
-            collection = db[cls.collection_name]
+            collection = cls.get_collection(db)
             
             result = await collection.find_one(query)
             if result:
@@ -376,7 +528,7 @@ class SafeDocument:
         
         try:
             db = cls.get_database()
-            collection = db[cls.collection_name]
+            collection = cls.get_collection(db)
             
             return await collection.count_documents(query)
         except Exception as e:
