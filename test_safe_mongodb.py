@@ -1,71 +1,177 @@
 """
-Test script for safe_mongodb.py functionality
+Test utility for verifying the SafeDocument and MongoDB connection.
+
+Run this script with:
+python test_safe_mongodb.py
 """
 
-import logging
+import os
+import sys
 import asyncio
-from utils.safe_mongodb import SafeDocument, SafeMongoDBResult
+import logging
+from datetime import datetime
+from dotenv import load_dotenv
 
 # Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
+logging.basicConfig(level=logging.INFO, 
+                   format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logger = logging.getLogger("test_safe_mongodb")
 
-logger = logging.getLogger(__name__)
+# Load environment variables
+load_dotenv()
 
-async def test_safe_document():
-    """Test the SafeDocument class"""
-    logger.info("Testing SafeDocument...")
-    
-    # Test initialization with empty data
-    doc1 = SafeDocument()
-    logger.info(f"Empty doc: {doc1}")
-    
-    # Test initialization with data
-    doc2 = SafeDocument({"name": "Test", "value": 123, "is_active": True})
-    logger.info(f"Doc with data: {doc2}")
-    
-    # Test helper methods
-    logger.info(f"get_str: {doc2.get_str('name')}")
-    logger.info(f"get_int: {doc2.get_int('value')}")
-    logger.info(f"get_bool: {doc2.get_bool('is_active')}")
-    logger.info(f"get_list (default): {doc2.get_list('items')}")
-    logger.info(f"get_dict (default): {doc2.get_dict('metadata')}")
-    
-    return True
+# Ensure MongoDB URI is set
+MONGODB_URI = os.environ.get("MONGODB_URI")
+if not MONGODB_URI:
+    logger.error("MONGODB_URI environment variable is not set")
+    sys.exit(1)
 
-async def test_safe_mongodb_result():
-    """Test the SafeMongoDBResult class"""
-    logger.info("Testing SafeMongoDBResult...")
-    
-    # Test success result
-    success = SafeMongoDBResult.success_result({"data": "test"})
-    logger.info(f"Success result: {success}")
-    logger.info(f"Success bool: {bool(success)}")
-    logger.info(f"Success data: {success.data}")
-    
-    # Test error result
-    error = SafeMongoDBResult.error_result("Test error", 404, "test_collection")
-    logger.info(f"Error result: {error}")
-    logger.info(f"Error bool: {bool(error)}")
-    logger.info(f"Error message: {error.error}")
-    
-    return True
+# Import our MongoDB utilities
+from utils.safe_mongodb import set_database, SafeDocument
+from utils.premium_mongodb_models import PremiumSubscription, ActivationCode
 
-async def main():
-    """Run all tests"""
+async def setup_mongodb():
+    """Set up MongoDB connection"""
     try:
-        logger.info("Starting safe_mongodb tests...")
+        # Import Motor and set up connection
+        from motor.motor_asyncio import AsyncIOMotorClient
         
-        # Run tests
-        await test_safe_document()
-        await test_safe_mongodb_result()
+        # Create client and connect to database
+        logger.info(f"Connecting to MongoDB at {MONGODB_URI[:20]}...")
+        client = AsyncIOMotorClient(MONGODB_URI)
+        db = client.get_default_database()
         
-        logger.info("All tests completed successfully!")
+        # Set the global database instance
+        set_database(db)
+        logger.info("MongoDB connection established successfully")
+        return True
     except Exception as e:
-        logger.error(f"Test failed: {e}")
-        raise
+        logger.error(f"Failed to connect to MongoDB: {e}")
+        return False
+
+async def test_premium_subscription():
+    """Test PremiumSubscription model"""
+    logger.info("\n--- Testing PremiumSubscription ---")
+    
+    # Create a test subscription
+    guild_id = "123456789"
+    tier = 1
+    activated_at = datetime.utcnow()
+    
+    logger.info(f"Creating test subscription for guild {guild_id}...")
+    sub = PremiumSubscription(
+        guild_id=guild_id,
+        tier=tier,
+        activated_at=activated_at
+    )
+    
+    # Save to database
+    save_result = await sub.save()
+    logger.info(f"Save result: {save_result}")
+    
+    # Retrieve by guild ID
+    logger.info(f"Retrieving subscription for guild {guild_id}...")
+    retrieved_sub = await PremiumSubscription.get_by_guild_id(guild_id)
+    
+    if retrieved_sub:
+        logger.info(f"Retrieved subscription: {retrieved_sub}")
+        logger.info(f"Is active: {retrieved_sub.is_active}")
+        
+        # Test upgrade
+        logger.info("Upgrading subscription to tier 2 with 30 days...")
+        upgrade_result = await retrieved_sub.upgrade(2, 30)
+        logger.info(f"Upgrade result: {upgrade_result}")
+        
+        # Retrieve again to verify upgrade
+        logger.info(f"Retrieving subscription after upgrade...")
+        updated_sub = await PremiumSubscription.get_by_guild_id(guild_id)
+        if updated_sub:
+            logger.info(f"Updated subscription: {updated_sub}")
+            logger.info(f"New tier: {updated_sub.tier}")
+            logger.info(f"Expires at: {updated_sub.expires_at}")
+            
+            # Test cancellation
+            logger.info("Cancelling subscription...")
+            cancel_result = await updated_sub.cancel()
+            logger.info(f"Cancel result: {cancel_result}")
+            
+            # Verify cancellation
+            cancelled_sub = await PremiumSubscription.get_by_guild_id(guild_id)
+            if cancelled_sub:
+                logger.info(f"Cancelled subscription: {cancelled_sub}")
+                logger.info(f"Is active: {cancelled_sub.is_active}")
+                
+                # Delete for cleanup
+                logger.info("Deleting test subscription...")
+                delete_result = await cancelled_sub.delete()
+                logger.info(f"Delete result: {delete_result}")
+            else:
+                logger.error("Could not retrieve cancelled subscription")
+        else:
+            logger.error("Could not retrieve updated subscription")
+    else:
+        logger.error("Could not retrieve subscription")
+
+async def test_activation_code():
+    """Test ActivationCode model"""
+    logger.info("\n--- Testing ActivationCode ---")
+    
+    # Generate an activation code
+    logger.info("Generating activation code...")
+    code = await ActivationCode.generate_code(
+        tier=2,
+        duration_days=30,
+        created_by="123456789"
+    )
+    
+    if code:
+        logger.info(f"Generated code: {code.code}")
+        
+        # Retrieve by code
+        logger.info(f"Retrieving activation code...")
+        retrieved_code = await ActivationCode.get_by_code(code.code)
+        
+        if retrieved_code:
+            logger.info(f"Retrieved code: {retrieved_code}")
+            
+            # Mark as used
+            logger.info("Marking code as used...")
+            used_result = await retrieved_code.mark_as_used("987654321")
+            logger.info(f"Used result: {used_result}")
+            
+            # Verify used status
+            logger.info(f"Retrieving code after being used...")
+            used_code = await ActivationCode.get_by_code(code.code)
+            if used_code:
+                logger.info(f"Used code: {used_code}")
+                logger.info(f"Used by: {used_code.used_by}")
+                logger.info(f"Used at: {used_code.used_at}")
+                
+                # Delete for cleanup
+                logger.info("Deleting test activation code...")
+                delete_result = await used_code.delete()
+                logger.info(f"Delete result: {delete_result}")
+            else:
+                logger.error("Could not retrieve used code")
+        else:
+            logger.error("Could not retrieve activation code")
+    else:
+        logger.error("Could not generate activation code")
+
+async def run_tests():
+    """Run all tests"""
+    # Set up MongoDB connection
+    db_setup = await setup_mongodb()
+    if not db_setup:
+        logger.error("MongoDB setup failed, tests cannot run")
+        return
+    
+    # Run tests
+    await test_premium_subscription()
+    await test_activation_code()
+    
+    logger.info("\n--- All tests completed ---")
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    # Run the tests
+    asyncio.run(run_tests())

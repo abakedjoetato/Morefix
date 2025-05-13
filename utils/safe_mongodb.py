@@ -1,544 +1,395 @@
 """
-Safe MongoDB result handling
+Safe MongoDB interaction utilities for the Tower of Temptation bot.
 
-This module provides utility classes and functions for safely handling MongoDB
-operations with consistent error patterns.
+This module provides safer MongoDB document handling with proper error handling,
+type validation, and compatibility with both Motor and PyMongo APIs.
 """
 
 import logging
-import traceback
-from typing import Any, Callable, Dict, List, Optional, Generic, TypeVar, Union, cast
+import uuid
+from typing import Dict, Any, List, Optional, Union, TypeVar, Generic, Type, cast
 
-import motor.motor_asyncio
-from motor.motor_asyncio import AsyncIOMotorClient, AsyncIOMotorDatabase, AsyncIOMotorCollection
-from pymongo.errors import PyMongoError
+# These import statements will be dynamically attempted at runtime to handle
+# different MongoDB installation patterns
+try:
+    from pymongo.database import Database
+    from pymongo.collection import Collection
+    from pymongo.results import InsertOneResult, UpdateResult, DeleteResult
+    from pymongo.errors import PyMongoError
+except ImportError:
+    # Define stub classes to allow type checking without hard dependency
+    class Database: pass
+    class Collection: pass
+    class InsertOneResult: pass
+    class UpdateResult: pass
+    class DeleteResult: pass
+    class PyMongoError(Exception): pass
 
 logger = logging.getLogger(__name__)
 
-class SafeDocument(Dict[str, Any]):
-    """
-    A wrapper around MongoDB document dictionaries with additional helper methods
-    
-    This class provides a way to work with MongoDB documents in a safer and
-    more convenient way.
-    """
-    
-    def __init__(self, data: Optional[Dict[str, Any]] = None):
-        """
-        Initialize the document
-        
-        Args:
-            data: Initial document data
-        """
-        super().__init__()
-        if data:
-            self.update(data)
-    
-    def get_id(self) -> Any:
-        """
-        Get the document ID
-        
-        Returns:
-            The document ID or None if not present
-        """
-        return self.get('_id')
-        
-    def get_str(self, key: str, default: str = "") -> str:
-        """
-        Get a string value from the document
-        
-        Args:
-            key: The key to get
-            default: Default value if key is not present or not a string
-            
-        Returns:
-            The string value or default
-        """
-        value = self.get(key)
-        if isinstance(value, str):
-            return value
-        return default
-        
-    def get_int(self, key: str, default: int = 0) -> int:
-        """
-        Get an integer value from the document
-        
-        Args:
-            key: The key to get
-            default: Default value if key is not present or not an integer
-            
-        Returns:
-            The integer value or default
-        """
-        value = self.get(key)
-        if isinstance(value, (int, float)) and not isinstance(value, bool):
-            return int(value)
-        return default
-        
-    def get_bool(self, key: str, default: bool = False) -> bool:
-        """
-        Get a boolean value from the document
-        
-        Args:
-            key: The key to get
-            default: Default value if key is not present or not a boolean
-            
-        Returns:
-            The boolean value or default
-        """
-        value = self.get(key)
-        if isinstance(value, bool):
-            return value
-        return default
-        
-    def get_list(self, key: str, default: Optional[List] = None) -> List:
-        """
-        Get a list value from the document
-        
-        Args:
-            key: The key to get
-            default: Default value if key is not present or not a list
-            
-        Returns:
-            The list value or default
-        """
-        if default is None:
-            default = []
-            
-        value = self.get(key)
-        if isinstance(value, list):
-            return value
-        return default
-        
-    def get_dict(self, key: str, default: Optional[Dict] = None) -> Dict:
-        """
-        Get a dictionary value from the document
-        
-        Args:
-            key: The key to get
-            default: Default value if key is not present or not a dictionary
-            
-        Returns:
-            The dictionary value or default
-        """
-        if default is None:
-            default = {}
-            
-        value = self.get(key)
-        if isinstance(value, dict):
-            return value
-        return default
+# Type variable for generic document classes
+T = TypeVar('T', bound='SafeDocument')
 
-# Type variable for result types
-T = TypeVar('T')
+# Singleton MongoDB database connection
+_db_instance = None
 
-class SafeMongoDBResult(Generic[T]):
-    """
-    A result container for MongoDB operations
-    
-    This provides a consistent way to handle MongoDB operation results with
-    success/error patterns.
-    """
-    
-    def __init__(
-        self,
-        success: bool,
-        data: Optional[T] = None,
-        error: Optional[str] = None,
-        error_code: Optional[int] = None,
-        collection_name: Optional[str] = None
-    ):
-        """
-        Initialize a MongoDB result
-        
-        Args:
-            success: Whether the operation was successful
-            data: The result data if successful
-            error: Error message if unsuccessful
-            error_code: Error code if unsuccessful
-            collection_name: Name of the collection that was operated on
-        """
-        self.success = success
-        self.data = data
-        self.error = error
-        self.error_code = error_code
-        self.collection_name = collection_name
-        
-    @property
-    def result(self) -> Optional[T]:
-        """
-        Get the result data
-        
-        This is an alias for the data property for compatibility with older code.
-        
-        Returns:
-            The result data or None if unsuccessful
-        """
-        return self.data
-        
-    @classmethod
-    def success_result(cls, data: Optional[T] = None) -> 'SafeMongoDBResult[T]':
-        """
-        Create a success result
-        
-        Args:
-            data: The result data
-            
-        Returns:
-            A success result with the given data
-        """
-        return cls(success=True, data=data)
-        
-    @classmethod
-    def error_result(
-        cls, 
-        error: str, 
-        error_code: Optional[int] = None, 
-        collection_name: Optional[str] = None
-    ) -> 'SafeMongoDBResult[T]':
-        """
-        Create an error result
-        
-        Args:
-            error: Error message
-            error_code: Error code
-            collection_name: Name of the collection that was operated on
-            
-        Returns:
-            An error result with the given error message
-        """
-        return cls(
-            success=False, 
-            error=error, 
-            error_code=error_code, 
-            collection_name=collection_name
-        )
-        
-    def __bool__(self) -> bool:
-        """
-        Convert to boolean
-        
-        Returns:
-            True if successful, False otherwise
-        """
-        return self.success
-        
-    def __str__(self) -> str:
-        """
-        Convert to string
-        
-        Returns:
-            String representation of the result
-        """
-        if self.success:
-            return f"Success: {self.data}"
-        else:
-            return f"Error: {self.error} (code: {self.error_code})"
-
-def safe_db_result(
-    func: Optional[Callable] = None,
-    *,
-    collection_name: Optional[str] = None,
-    default_value: Any = None
-):
-    """
-    Decorator for safely executing MongoDB operations
+def set_database(db_instance: Database) -> None:
+    """Set the global MongoDB database instance
     
     Args:
-        func: The function to decorate
-        collection_name: Name of the collection to include in error messages
-        default_value: Default value to return if operation fails
-        
+        db_instance: MongoDB database instance
+    """
+    global _db_instance
+    _db_instance = db_instance
+    
+def get_database() -> Optional[Database]:
+    """Get the global MongoDB database instance
+    
     Returns:
-        The decorated function
+        The MongoDB database instance or None if not set
     """
-    def decorator(func: Callable) -> Callable:
-        async def wrapper(*args, **kwargs) -> SafeMongoDBResult:
-            try:
-                result = await func(*args, **kwargs)
-                return SafeMongoDBResult(
-                    success=True,
-                    data=result,
-                    collection_name=collection_name
-                )
-            except PyMongoError as e:
-                error_code = getattr(e, 'code', None)
-                logger.error(f"MongoDB error in {collection_name or func.__name__}: {e}")
-                logger.debug(traceback.format_exc())
-                return SafeMongoDBResult(
-                    success=False,
-                    data=default_value,
-                    error=str(e),
-                    error_code=error_code,
-                    collection_name=collection_name
-                )
-            except Exception as e:
-                logger.error(f"Unexpected error in {collection_name or func.__name__}: {e}")
-                logger.debug(traceback.format_exc())
-                return SafeMongoDBResult(
-                    success=False,
-                    data=default_value,
-                    error=str(e),
-                    collection_name=collection_name
-                )
-                
-        return wrapper
-        
-    # Allow use as either @safe_db_result or @safe_db_result(collection_name="x")
-    if func is None:
-        return decorator
-    else:
-        return decorator(func)
+    return _db_instance
 
-class SafeMongoDBClient:
-    """
-    A wrapper around AsyncIOMotorClient with safer operation handling
+class SafeMongoDBResult:
+    """Wrapper class for MongoDB operation results with safer access methods"""
     
-    This class provides methods that return SafeMongoDBResult objects for
-    consistent error handling.
-    """
-    
-    def __init__(self, uri: str, db_name: Optional[str] = None):
-        """
-        Initialize the MongoDB client
+    def __init__(self, raw_result: Union[InsertOneResult, UpdateResult, DeleteResult, Any]):
+        """Initialize with a raw MongoDB result
         
         Args:
-            uri: MongoDB connection URI
-            db_name: Default database name
+            raw_result: Raw result from MongoDB operation
         """
-        self.uri = uri
-        self.db_name = db_name
-        self.client: Optional[AsyncIOMotorClient] = None
-        self.db: Optional[AsyncIOMotorDatabase] = None
+        self._raw_result = raw_result
         
-    async def connect(self) -> SafeMongoDBResult[bool]:
-        """
-        Connect to the MongoDB server
+    @property
+    def acknowledged(self) -> bool:
+        """Whether the operation was acknowledged
         
         Returns:
-            SafeMongoDBResult with success/error status
+            bool: True if acknowledged, False otherwise
         """
-        try:
-            self.client = AsyncIOMotorClient(self.uri)
-            
-            # Test the connection with a ping
-            await self.client.admin.command('ping')
-            
-            # Set the default database if provided
-            if self.db_name:
-                self.db = self.client[self.db_name]
+        if hasattr(self._raw_result, 'acknowledged'):
+            return bool(self._raw_result.acknowledged)
+        return False
+        
+    @property
+    def inserted_id(self) -> Optional[str]:
+        """Get the ID of the inserted document
+        
+        Returns:
+            Optional[str]: Inserted document ID or None
+        """
+        if hasattr(self._raw_result, 'inserted_id'):
+            return str(self._raw_result.inserted_id)
+        return None
+        
+    @property
+    def modified_count(self) -> int:
+        """Get the number of modified documents
+        
+        Returns:
+            int: Number of modified documents
+        """
+        if hasattr(self._raw_result, 'modified_count'):
+            return int(self._raw_result.modified_count)
+        return 0
+        
+    @property
+    def matched_count(self) -> int:
+        """Get the number of matched documents
+        
+        Returns:
+            int: Number of matched documents
+        """
+        if hasattr(self._raw_result, 'matched_count'):
+            return int(self._raw_result.matched_count)
+        return 0
+        
+    @property
+    def deleted_count(self) -> int:
+        """Get the number of deleted documents
+        
+        Returns:
+            int: Number of deleted documents
+        """
+        if hasattr(self._raw_result, 'deleted_count'):
+            return int(self._raw_result.deleted_count)
+        return 0
+        
+    @property
+    def upserted_id(self) -> Optional[str]:
+        """Get the ID of the upserted document
+        
+        Returns:
+            Optional[str]: Upserted document ID or None
+        """
+        if hasattr(self._raw_result, 'upserted_id') and self._raw_result.upserted_id:
+            return str(self._raw_result.upserted_id)
+        return None
+        
+    def is_success(self) -> bool:
+        """Check if the operation was successful
+        
+        Returns:
+            bool: True if successful, False otherwise
+        """
+        # Different ways to determine success depending on operation type
+        if hasattr(self._raw_result, 'acknowledged'):
+            if not self._raw_result.acknowledged:
+                return False
                 
-            return SafeMongoDBResult(success=True, data=True)
-        except PyMongoError as e:
-            error_code = getattr(e, 'code', None)
-            logger.error(f"MongoDB connection error: {e}")
-            return SafeMongoDBResult(
-                success=False,
-                data=False,
-                error=str(e),
-                error_code=error_code
-            )
-        except Exception as e:
-            logger.error(f"Unexpected connection error: {e}")
-            return SafeMongoDBResult(
-                success=False,
-                data=False,
-                error=str(e)
-            )
+        # Insert operations
+        if hasattr(self._raw_result, 'inserted_id'):
+            return self._raw_result.inserted_id is not None
             
-    def get_database(self, db_name: Optional[str] = None) -> AsyncIOMotorDatabase:
-        """
-        Get a database from the client
+        # Update operations
+        if hasattr(self._raw_result, 'modified_count') or hasattr(self._raw_result, 'matched_count'):
+            modified = getattr(self._raw_result, 'modified_count', 0)
+            matched = getattr(self._raw_result, 'matched_count', 0)
+            upserted = hasattr(self._raw_result, 'upserted_id') and self._raw_result.upserted_id is not None
+            return modified > 0 or upserted or matched > 0
+            
+        # Delete operations
+        if hasattr(self._raw_result, 'deleted_count'):
+            return self._raw_result.deleted_count > 0
+            
+        # Fallback for unknown result types
+        return True
+        
+    def __str__(self) -> str:
+        """String representation"""
+        return f"SafeMongoDBResult({str(self._raw_result)})"
+        
+    def __repr__(self) -> str:
+        """Detailed representation"""
+        return f"SafeMongoDBResult({repr(self._raw_result)})"
+
+class SafeDocument:
+    """Base class for MongoDB document models with safe operations"""
+    
+    # Collection name to be overridden by subclasses
+    collection_name = "documents"
+    
+    def __init__(self, _id: Optional[str] = None):
+        """Initialize document with optional ID
         
         Args:
-            db_name: Database name (defaults to self.db_name if not provided)
-            
+            _id: MongoDB document ID
+        """
+        self._id = _id or str(uuid.uuid4())
+        
+    @classmethod
+    def get_database(cls) -> Database:
+        """Get the MongoDB database
+        
         Returns:
-            The database object
+            Database: MongoDB database instance
             
         Raises:
-            RuntimeError: If not connected
+            RuntimeError: If database is not initialized
         """
-        if self.client is None:
-            raise RuntimeError("Not connected to MongoDB")
-            
-        if db_name:
-            return self.client[db_name]
-        elif self.db:
-            return self.db
-        else:
-            raise RuntimeError("No database name provided")
-            
-    def get_collection(
-        self,
-        collection_name: str,
-        db_name: Optional[str] = None
-    ) -> AsyncIOMotorCollection:
-        """
-        Get a collection from the database
+        db = get_database()
+        if db is None:
+            raise RuntimeError("MongoDB database not initialized. Call set_database() first.")
+        return db
         
-        Args:
-            collection_name: Collection name
-            db_name: Database name (defaults to self.db_name if not provided)
-            
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert document to dictionary for MongoDB storage
+        
         Returns:
-            The collection object
+            Dict[str, Any]: Document as dictionary
+        """
+        # Get all instance attributes
+        result = {}
+        for key, value in self.__dict__.items():
+            # Skip private attributes
+            if key.startswith('_') and key != '_id':
+                continue
+                
+            # Include all other attributes
+            result[key] = value
             
-        Raises:
-            RuntimeError: If not connected
-        """
-        db = self.get_database(db_name)
-        return db[collection_name]
-        
-    @safe_db_result
-    async def find_one(
-        self,
-        collection_name: str,
-        query: Dict[str, Any],
-        db_name: Optional[str] = None
-    ) -> Any:
-        """
-        Find a single document in a collection
-        
-        Args:
-            collection_name: Collection name
-            query: Query to match the document
-            db_name: Database name (defaults to self.db_name if not provided)
-            
-        Returns:
-            The document if found
-        """
-        collection = self.get_collection(collection_name, db_name)
-        result = await collection.find_one(query)
         return result
         
-    @safe_db_result
-    async def find(
-        self,
-        collection_name: str,
-        query: Dict[str, Any],
-        db_name: Optional[str] = None,
-        sort: Optional[List[tuple]] = None,
-        limit: Optional[int] = None
-    ) -> List[Dict[str, Any]]:
-        """
-        Find documents in a collection
+    @classmethod
+    def from_dict(cls: Type[T], data: Dict[str, Any]) -> T:
+        """Create document from dictionary
         
         Args:
-            collection_name: Collection name
-            query: Query to match the documents
-            db_name: Database name (defaults to self.db_name if not provided)
-            sort: Sort specification
-            limit: Maximum number of documents to return
+            data: Dictionary containing document data
             
         Returns:
-            List of documents
+            Document instance
         """
-        collection = self.get_collection(collection_name, db_name)
-        cursor = collection.find(query)
+        return cls(**data)
         
-        if sort:
-            cursor = cursor.sort(sort)
-            
-        if limit:
-            cursor = cursor.limit(limit)
-            
-        return await cursor.to_list(length=limit if limit else None)
+    async def save(self) -> bool:
+        """Save document to MongoDB
         
-    @safe_db_result
-    async def insert_one(
-        self,
-        collection_name: str,
-        document: Dict[str, Any],
-        db_name: Optional[str] = None
-    ) -> str:
+        Returns:
+            bool: True if successful, False otherwise
         """
-        Insert a document into a collection
+        try:
+            db = self.get_database()
+            collection = db[self.collection_name]
+            
+            document_dict = self.to_dict()
+            
+            # Use upsert to insert or update
+            result = await collection.update_one(
+                {"_id": self._id},
+                {"$set": document_dict},
+                upsert=True
+            )
+            
+            safe_result = SafeMongoDBResult(result)
+            return safe_result.is_success()
+            
+        except Exception as e:
+            logger.error(f"Error saving document to {self.collection_name}: {e}")
+            return False
+            
+    async def delete(self) -> bool:
+        """Delete document from MongoDB
+        
+        Returns:
+            bool: True if successful, False otherwise
+        """
+        try:
+            db = self.get_database()
+            collection = db[self.collection_name]
+            
+            result = await collection.delete_one({"_id": self._id})
+            
+            safe_result = SafeMongoDBResult(result)
+            return safe_result.is_success()
+            
+        except Exception as e:
+            logger.error(f"Error deleting document from {self.collection_name}: {e}")
+            return False
+            
+    @classmethod
+    async def get_by_id(cls: Type[T], doc_id: str) -> Optional[T]:
+        """Get document by ID
         
         Args:
-            collection_name: Collection name
-            document: Document to insert
-            db_name: Database name (defaults to self.db_name if not provided)
+            doc_id: Document ID
             
         Returns:
-            ID of the inserted document
+            Optional[T]: Document instance or None if not found
         """
-        collection = self.get_collection(collection_name, db_name)
-        result = await collection.insert_one(document)
-        return str(result.inserted_id)
+        if not doc_id:
+            return None
+            
+        try:
+            db = cls.get_database()
+            collection = db[cls.collection_name]
+            
+            result = await collection.find_one({"_id": doc_id})
+            if result:
+                return cls.from_dict(result)
+            return None
+        except Exception as e:
+            logger.error(f"Error getting document by ID from {cls.collection_name}: {e}")
+            return None
+            
+    @classmethod
+    async def get_all(cls: Type[T]) -> List[T]:
+        """Get all documents from collection
         
-    @safe_db_result
-    async def update_one(
-        self,
-        collection_name: str,
-        query: Dict[str, Any],
-        update: Dict[str, Any],
-        db_name: Optional[str] = None,
-        upsert: bool = False
-    ) -> bool:
+        Returns:
+            List[T]: List of document instances
         """
-        Update a document in a collection
+        try:
+            db = cls.get_database()
+            collection = db[cls.collection_name]
+            
+            cursor = collection.find({})
+            documents = []
+            
+            async for document in cursor:
+                documents.append(cls.from_dict(document))
+                
+            return documents
+        except Exception as e:
+            logger.error(f"Error getting all documents from {cls.collection_name}: {e}")
+            return []
+            
+    @classmethod
+    async def find(cls: Type[T], query: Dict[str, Any]) -> List[T]:
+        """Find documents matching query
         
         Args:
-            collection_name: Collection name
-            query: Query to match the document
-            update: Update to apply
-            db_name: Database name (defaults to self.db_name if not provided)
-            upsert: Whether to insert if not found
+            query: MongoDB query
             
         Returns:
-            True if a document was modified
+            List[T]: List of document instances
         """
-        collection = self.get_collection(collection_name, db_name)
-        result = await collection.update_one(query, update, upsert=upsert)
-        return result.modified_count > 0 or (upsert and result.upserted_id is not None)
-        
-    @safe_db_result
-    async def delete_one(
-        self,
-        collection_name: str,
-        query: Dict[str, Any],
-        db_name: Optional[str] = None
-    ) -> bool:
-        """
-        Delete a document from a collection
+        try:
+            db = cls.get_database()
+            collection = db[cls.collection_name]
+            
+            cursor = collection.find(query)
+            documents = []
+            
+            async for document in cursor:
+                documents.append(cls.from_dict(document))
+                
+            return documents
+        except Exception as e:
+            logger.error(f"Error finding documents in {cls.collection_name}: {e}")
+            return []
+            
+    @classmethod
+    async def find_one(cls: Type[T], query: Dict[str, Any]) -> Optional[T]:
+        """Find one document matching query
         
         Args:
-            collection_name: Collection name
-            query: Query to match the document
-            db_name: Database name (defaults to self.db_name if not provided)
+            query: MongoDB query
             
         Returns:
-            True if a document was deleted
+            Optional[T]: Document instance or None if not found
         """
-        collection = self.get_collection(collection_name, db_name)
-        result = await collection.delete_one(query)
-        return result.deleted_count > 0
-        
-    @safe_db_result
-    async def count_documents(
-        self,
-        collection_name: str,
-        query: Dict[str, Any],
-        db_name: Optional[str] = None
-    ) -> int:
-        """
-        Count documents in a collection
+        try:
+            db = cls.get_database()
+            collection = db[cls.collection_name]
+            
+            result = await collection.find_one(query)
+            if result:
+                return cls.from_dict(result)
+            return None
+        except Exception as e:
+            logger.error(f"Error finding one document in {cls.collection_name}: {e}")
+            return None
+            
+    @classmethod
+    async def count(cls, query: Dict[str, Any] = None) -> int:
+        """Count documents matching query
         
         Args:
-            collection_name: Collection name
-            query: Query to match the documents
-            db_name: Database name (defaults to self.db_name if not provided)
+            query: MongoDB query (default: all documents)
             
         Returns:
-            Number of documents
+            int: Number of matching documents
         """
-        collection = self.get_collection(collection_name, db_name)
-        return await collection.count_documents(query)
+        query = query or {}
         
-    def close(self):
-        """Close the MongoDB connection"""
-        if self.client:
-            self.client.close()
-            self.client = None
-            self.db = None
+        try:
+            db = cls.get_database()
+            collection = db[cls.collection_name]
+            
+            return await collection.count_documents(query)
+        except Exception as e:
+            logger.error(f"Error counting documents in {cls.collection_name}: {e}")
+            return 0
+            
+    def __str__(self) -> str:
+        """String representation"""
+        class_name = self.__class__.__name__
+        return f"{class_name}(_id={self._id})"
+        
+    def __repr__(self) -> str:
+        """Detailed representation"""
+        class_name = self.__class__.__name__
+        attributes = ", ".join(f"{k}={repr(v)}" for k, v in self.__dict__.items())
+        return f"{class_name}({attributes})"

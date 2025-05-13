@@ -1,9 +1,13 @@
 """
-Interaction handling utilities for Discord bot cogs
+Interaction Handlers for py-cord 2.6.1 Compatibility
+
+This module provides utilities for safely interacting with Discord Interactions
+across different versions of py-cord and discord.py.
 """
 
 import logging
-from typing import Any, Dict, List, Optional, Union, cast
+import traceback
+from typing import Union, Any, Dict, Optional
 
 import discord
 from discord.ext import commands
@@ -11,186 +15,124 @@ from discord.ext import commands
 logger = logging.getLogger(__name__)
 
 async def safely_respond_to_interaction(
-    interaction: discord.Interaction, 
-    message: str, 
-    ephemeral: bool = False, 
-    embed: Optional[discord.Embed] = None
-) -> bool:
-    """
-    Safely respond to an interaction with error handling
-    
-    Args:
-        interaction: The interaction to respond to
-        message: The message to send
-        ephemeral: Whether the response should be ephemeral
-        embed: Optional embed to send
-        
-    Returns:
-        True if responded successfully, False otherwise
-    """
-    try:
-        if not interaction.response.is_done():
-            if embed:
-                await interaction.response.send_message(message, ephemeral=ephemeral, embed=embed)
-            else:
-                await interaction.response.send_message(message, ephemeral=ephemeral)
-            return True
-        else:
-            if embed:
-                await interaction.followup.send(message, ephemeral=ephemeral, embed=embed)
-            else:
-                await interaction.followup.send(message, ephemeral=ephemeral)
-            return True
-    except Exception as e:
-        logger.error(f"Failed to respond to interaction: {e}")
-        return False
-
-def get_interaction_user(interaction: discord.Interaction) -> Optional[Union[discord.User, discord.Member]]:
-    """
-    Get the user from an interaction with proper type handling
-    
-    Args:
-        interaction: The interaction
-        
-    Returns:
-        The user or None if not found
-    """
-    # In py-cord 2.6.1, interaction.user is available but in some older versions
-    # we need to access interaction.user
-    user = getattr(interaction, "user", None)
-    if user is None:
-        # Fall back to author for older versions
-        user = getattr(interaction, "author", None)
-    
-    return user
-
-def get_interaction_user_id(interaction: discord.Interaction) -> Optional[int]:
-    """
-    Get the user ID from an interaction with proper type handling
-    
-    Args:
-        interaction: The interaction
-        
-    Returns:
-        The user ID or None if not found
-    """
-    # In py-cord 2.6.1, interaction.user.id is available but in some older versions
-    # we might need to access interaction.user_id directly
-    user_id = getattr(interaction, "user_id", None)
-    if user_id is None:
-        # Fall back to user.id
-        user = get_interaction_user(interaction)
-        if user is not None:
-            user_id = user.id
-    
-    return user_id
-
-async def send_embed_response(
-    ctx_or_interaction: Union[commands.Context, discord.Interaction],
-    title: str,
-    description: str,
-    color: Union[discord.Color, int] = discord.Color.blue(),
+    interaction: discord.Interaction,
+    content_or_embed: Union[str, discord.Embed, Dict[str, Any], None] = None,
+    *,
     ephemeral: bool = False,
-    fields: Optional[List[Dict[str, str]]] = None
+    view: Optional[discord.ui.View] = None,
+    delete_after: Optional[float] = None,
+    file: Optional[discord.File] = None,
+    files: Optional[list] = None
 ) -> bool:
     """
-    Send an embed response to either a context or interaction
+    Safely respond to an interaction using proper response methods depending on state
     
     Args:
-        ctx_or_interaction: The context or interaction
-        title: The embed title
-        description: The embed description
-        color: The embed color
-        ephemeral: Whether the response should be ephemeral (for interactions)
-        fields: Optional list of fields to add to the embed
+        interaction: The Discord interaction to respond to
+        content_or_embed: Content, embed or data dict to send as response
+        ephemeral: Whether the response should be ephemeral
+        view: View component to attach to the response
+        delete_after: Time after which to delete the response (followup only)
+        file: File to attach to the response
+        files: Files to attach to the response
         
     Returns:
-        True if sent successfully, False otherwise
+        bool: True if response was sent successfully, False otherwise
     """
     try:
-        embed = discord.Embed(
-            title=title,
-            description=description,
-            color=color
-        )
-        
-        if fields:
-            for field in fields:
-                embed.add_field(
-                    name=field.get("name", ""),
-                    value=field.get("value", ""),
-                    inline=field.get("inline", False)
-                )
-        
-        if isinstance(ctx_or_interaction, commands.Context):
-            await ctx_or_interaction.send(embed=embed)
-            return True
-        elif isinstance(ctx_or_interaction, discord.Interaction):
-            return await safely_respond_to_interaction(
-                ctx_or_interaction, 
-                "",  # Empty message, using embed for content
-                ephemeral=ephemeral, 
-                embed=embed
-            )
-        
-        return False
-    except Exception as e:
-        logger.error(f"Failed to send embed response: {e}")
-        return False
-
-async def send_channel_message(
-    channel: discord.abc.Messageable,
-    message: str,
-    embed: Optional[discord.Embed] = None
-) -> Optional[discord.Message]:
-    """
-    Send a message to a channel with error handling
-    
-    Args:
-        channel: The channel to send to
-        message: The message to send
-        embed: Optional embed to send
-        
-    Returns:
-        The sent message or None if failed
-    """
-    try:
-        if embed:
-            return await channel.send(message, embed=embed)
-        else:
-            return await channel.send(message)
-    except Exception as e:
-        logger.error(f"Failed to send channel message: {e}")
-        return None
-
-async def update_message(
-    message: discord.Message,
-    new_content: Optional[str] = None,
-    new_embed: Optional[discord.Embed] = None
-) -> bool:
-    """
-    Update a message with error handling
-    
-    Args:
-        message: The message to update
-        new_content: Optional new content
-        new_embed: Optional new embed
-        
-    Returns:
-        True if updated successfully, False otherwise
-    """
-    try:
-        kwargs = {}
-        if new_content is not None:
-            kwargs["content"] = new_content
-        if new_embed is not None:
-            kwargs["embed"] = new_embed
+        # Prepare kwargs for response/followup
+        kwargs = {'ephemeral': ephemeral}
+        if view is not None:
+            kwargs['view'] = view
             
-        if kwargs:
-            await message.edit(**kwargs)
-            return True
+        # Handle file attachments
+        if file is not None:
+            kwargs['file'] = file
+        if files is not None:
+            kwargs['files'] = files
+            
+        # Process content or embed
+        if isinstance(content_or_embed, str):
+            kwargs['content'] = content_or_embed
+        elif isinstance(content_or_embed, discord.Embed):
+            kwargs['embed'] = content_or_embed
+        elif isinstance(content_or_embed, dict):
+            # Handle sending a data dict
+            kwargs.update(content_or_embed)
         
-        return False
+        # Check if interaction has been responded to already
+        if hasattr(interaction, 'response') and hasattr(interaction.response, 'is_done'):
+            if interaction.response.is_done():
+                # Already responded, use followup
+                if hasattr(interaction, 'followup'):
+                    # Use modern followup
+                    if delete_after is not None:
+                        # Map delete_after to followup call if supported
+                        if hasattr(interaction.followup, 'send') and 'delete_after' in interaction.followup.send.__code__.co_varnames:
+                            kwargs['delete_after'] = delete_after
+                    
+                    # Send the followup
+                    await interaction.followup.send(**kwargs)
+                    return True
+                else:
+                    # Old versions might not have followup
+                    logger.warning("Interaction response already sent but followup not available")
+                    return False
+            else:
+                # Not responded yet, send initial response
+                await interaction.response.send_message(**kwargs)
+                return True
+        else:
+            # No response attribute, try basic methods
+            try:
+                # Try the direct response send approach
+                await interaction.response.send_message(**kwargs)
+                return True
+            except AttributeError:
+                # For very old versions or edge cases
+                try:
+                    await interaction.send(**kwargs)
+                    return True
+                except Exception as e:
+                    logger.error(f"Failed to respond to interaction: {e}")
+                    return False
+                    
     except Exception as e:
-        logger.error(f"Failed to update message: {e}")
+        logger.error(f"Error in safely_respond_to_interaction: {e}", exc_info=True)
         return False
+
+def get_interaction_user(ctx_or_interaction) -> Optional[Union[discord.User, discord.Member]]:
+    """
+    Get the user from an interaction or context object
+    
+    Args:
+        ctx_or_interaction: The interaction or context
+        
+    Returns:
+        Optional[Union[discord.User, discord.Member]]: The user or None if not found
+    """
+    # Extract from interaction
+    if isinstance(ctx_or_interaction, discord.Interaction):
+        if hasattr(ctx_or_interaction, 'user') and ctx_or_interaction.user is not None:
+            return ctx_or_interaction.user
+        elif hasattr(ctx_or_interaction, 'author') and ctx_or_interaction.author is not None:
+            return ctx_or_interaction.author
+            
+    # Extract from context
+    elif isinstance(ctx_or_interaction, commands.Context):
+        if hasattr(ctx_or_interaction, 'author') and ctx_or_interaction.author is not None:
+            return ctx_or_interaction.author
+        elif hasattr(ctx_or_interaction, 'user') and ctx_or_interaction.user is not None:
+            return ctx_or_interaction.user
+            
+    # Try generic attribute access as last resort
+    try:
+        if hasattr(ctx_or_interaction, 'user'):
+            return ctx_or_interaction.user
+        elif hasattr(ctx_or_interaction, 'author'):
+            return ctx_or_interaction.author
+    except:
+        pass
+        
+    # Couldn't find user
+    return None

@@ -1,363 +1,224 @@
 """
-Error Handlers for Tower of Temptation PvP Statistics Bot
+Error handling utilities for Discord command errors.
 
-This module provides specialized error handlers:
-1. Discord command error handlers
-2. SFTP operation error handlers
-3. Database operation error handlers
-4. Rate limiting and timeout handlers
-5. User-friendly error responses
-
-The handlers integrate with the error telemetry system for tracking and analysis.
+This module provides a comprehensive error handling system for both
+application commands and traditional commands across different Discord library versions.
 """
+
 import logging
-import asyncio
-import re
 import traceback
-from datetime import datetime
-from typing import Dict, Any, Optional, Union, Callable, List
+from typing import Any, Dict, Optional, Union, Tuple, List, Callable
 
 import discord
 from discord.ext import commands
 
-from utils.error_telemetry import ErrorTelemetry, categorize_error
-from utils.sftp_exceptions import SFTPError, format_error_for_user
+from utils.discord_compat import get_command_name, format_command_signature, is_guild_only
 
-# Configure module-specific logger
 logger = logging.getLogger(__name__)
 
-# Error response templates
-ERROR_TEMPLATES = {
-    "default": {
-        "title": "An error occurred",
-        "color": 0xE74C3C,  # Red
-        "description": "Sorry, something went wrong while processing your request.",
-        "footer": "Error ID: {error_id}"
-    },
-    "permission": {
-        "title": "Permission Error",
-        "color": 0xF39C12,  # Orange
-        "description": "You don't have permission to use this command.",
-        "footer": "Required permission: {permission}"
-    },
-    "validation": {
-        "title": "Invalid Input",
-        "color": 0x3498DB,  # Blue
-        "description": "The provided input is invalid: {message}",
-        "footer": "Please check the command help for correct usage."
-    },
-    "timeout": {
-        "title": "Request Timed Out",
-        "color": 0xE74C3C,  # Red
-        "description": "The operation took too long to complete and timed out.",
-        "footer": "Please try again later."
-    },
-    "not_found": {
-        "title": "Not Found",
-        "color": 0x95A5A6,  # Gray
-        "description": "The requested {resource} could not be found.",
-        "footer": "Please check your input and try again."
-    },
-    "rate_limit": {
-        "title": "Rate Limited",
-        "color": 0xF39C12,  # Orange
-        "description": "You're doing that too frequently. Please wait {retry_after:.1f} seconds before trying again.",
-        "footer": "Rate limits help ensure fair usage for all users."
-    },
-    "discord_api": {
-        "title": "Discord API Error",
-        "color": 0xE74C3C,  # Red
-        "description": "There was an error communicating with Discord: {message}",
-        "footer": "This issue is likely temporary. Please try again later."
-    },
-    "database": {
-        "title": "Database Error",
-        "color": 0xE74C3C,  # Red
-        "description": "There was a problem with the database operation.",
-        "footer": "Error ID: {error_id}"
-    },
-    "sftp": {
-        "title": "SFTP Error",
-        "color": 0xE74C3C,  # Red
-        "description": "There was a problem with the SFTP operation: {message}",
-        "footer": "Error ID: {error_id}"
-    }
-}
+# Error types categorization
+PERMISSION_ERRORS = (
+    commands.MissingPermissions,
+    commands.BotMissingPermissions,
+    commands.MissingRole,
+    commands.BotMissingRole,
+    commands.MissingAnyRole,
+    commands.BotMissingAnyRole
+)
 
-# User-friendly error message patterns
-USER_FRIENDLY_PATTERNS = [
-    # Discord API errors
-    (r"(?i)Unknown interaction", "The command interaction expired. Please try again."),
-    (r"(?i)Unknown [Mm]essage", "The message was deleted or is too old to interact with."),
-    (r"(?i)Cannot send an empty message", "The response couldn't be generated properly. Please try again."),
-    (r"(?i)Missing Permissions", "I don't have the necessary permissions to complete this action."),
-    (r"(?i)Interaction has already been responded to", "The command took too long to process. Please try again."),
+COOLDOWN_ERRORS = (
+    commands.CommandOnCooldown,
+)
+
+USER_INPUT_ERRORS = (
+    commands.MissingRequiredArgument,
+    commands.BadArgument,
+    commands.BadUnionArgument,
+    commands.BadLiteralArgument,
+    commands.ArgumentParsingError,
+    commands.UserInputError
+)
+
+CHECK_FAILURE_ERRORS = (
+    commands.CheckFailure,
+    commands.CheckAnyFailure,
+    commands.PrivateMessageOnly,
+    commands.NoPrivateMessage,
+    commands.NotOwner
+)
+
+DISCORD_ERRORS = (
+    discord.Forbidden,
+    discord.NotFound,
+    discord.HTTPException
+)
+
+# Try to import app command specific errors if available
+try:
+    from discord import app_commands
+    APP_COMMAND_ERRORS = (
+        app_commands.CommandInvokeError,
+        app_commands.CommandNotFound,
+        app_commands.TransformerError
+    )
+except (ImportError, AttributeError):
+    APP_COMMAND_ERRORS = tuple()
+
+def get_error_data(error: Exception) -> Dict[str, Any]:
+    """Extract useful data from an error for error handling
+    
+    Args:
+        error: The exception that was raised
+        
+    Returns:
+        Dict with error information
+    """
+    if error is None:
+        return {}
+        
+    data = {
+        "type": type(error).__name__,
+        "message": str(error)
+    }
+    
+    # Extract additional data based on error type
     
     # Permission errors
-    (r"(?i)Missing.*permission", "You don't have the required permissions for this command."),
-    (r"(?i)You need (\w+) permission", "You need {1} permission to use this command."),
+    if isinstance(error, commands.MissingPermissions):
+        data["missing_perms"] = getattr(error, "missing_permissions", [])
     
-    # SFTP errors
-    (r"(?i)Authentication failed", "SFTP authentication failed. Please check your username and password."),
-    (r"(?i)Connection refused", "Couldn't connect to the SFTP server. Please check if it's online."),
-    (r"(?i)No such file", "The specified file doesn't exist on the server."),
-    (r"(?i)Path not found", "The specified path doesn't exist on the server."),
+    # Cooldown errors
+    elif isinstance(error, commands.CommandOnCooldown):
+        data["retry_after"] = getattr(error, "retry_after", 0)
+        data["cooldown_type"] = getattr(error, "type", None)
+        
+    # Add traceback for unexpected errors
+    elif not isinstance(error, (
+        PERMISSION_ERRORS + COOLDOWN_ERRORS + USER_INPUT_ERRORS + 
+        CHECK_FAILURE_ERRORS + DISCORD_ERRORS + APP_COMMAND_ERRORS
+    )):
+        data["traceback"] = traceback.format_exception(type(error), error, error.__traceback__)
     
-    # Database errors
-    (r"(?i)duplicate key error", "This record already exists in the database."),
-    (r"(?i)connection.*closed", "Database connection error. Please try again."),
-    
-    # Rate limits
-    (r"(?i)rate limited", "You're doing that too frequently. Please wait and try again."),
-    
-    # Validation errors
-    (r"(?i)invalid.*format", "The input format is invalid. Please check and try again."),
-    (r"(?i)required parameter", "A required parameter is missing. Please check the command syntax."),
-    
-    # Timeout errors
-    (r"(?i)timed out", "The operation took too long and timed out. Please try again later.")
-]
+    return data
 
-def format_user_friendly_error(error: Exception) -> str:
-    """Format an exception as a user-friendly message
+async def handle_command_error(
+    ctx_or_interaction: Union[commands.Context, discord.Interaction],
+    error: Exception,
+    ephemeral: bool = True
+) -> bool:
+    """Handle command errors for both traditional and application commands
     
     Args:
-        error: The exception to format
+        ctx_or_interaction: Command context or interaction
+        error: The error that occurred
+        ephemeral: Whether the error response should be ephemeral (application commands only)
         
     Returns:
-        User-friendly error message
+        bool: True if the error was handled, False otherwise
     """
-    error_str = str(error)
-    
-    # Check if this is an SFTP error with a user-friendly format
-    if isinstance(error, SFTPError):
-        return format_error_for_user(error)
-    
-    # Try to match against known patterns
-    for pattern, message in USER_FRIENDLY_PATTERNS:
-        match = re.search(pattern, error_str)
-        if match:
-            # If the message has format groups, fill them in
-            if '{' in message and '}' in message and len(match.groups()) > 0:
-                try:
-                    return message.format(*match.groups())
-                except:
-                    pass
-            return message
-    
-    # For CheckFailure errors, extract the check name
-    if isinstance(error, commands.CheckFailure):
-        check_name = type(error).__name__.replace('Check', '').replace('Failure', '')
-        if check_name:
-            return f"Check failed: {check_name}. You may not have the required permissions."
-    
-    # For CommandNotFound, give a helpful message
-    if isinstance(error, commands.CommandNotFound):
-        return "That command doesn't exist. Use `/help` to see available commands."
-    
-    # For UserInputError, try to give specific guidance
-    if isinstance(error, commands.UserInputError):
-        if isinstance(error, commands.MissingRequiredArgument):
-            return f"Missing required argument: `{error.param.name}`"
-        elif isinstance(error, commands.BadArgument):
-            return f"Invalid argument: {str(error)}"
-        elif isinstance(error, commands.TooManyArguments):
-            return "Too many arguments provided."
-        elif isinstance(error, commands.BadUnionArgument):
-            return f"Could not convert to any of: {', '.join(c.__name__ for c in error.converters)}"
-        else:
-            return f"Invalid input: {str(error)}"
-    
-    # Fall back to a generic message for other errors
-    return "An error occurred while processing your request."
-
-async def handle_command_error(interaction: discord.Interaction, error: Exception) -> discord.Embed:
-    """Handle a Discord command error
-    
-    Args:
-        interaction: Discord interaction
-        error: The exception that occurred
+    # Unwrap CommandInvokeError if needed
+    if hasattr(error, "original"):
+        error = error.original
         
-    Returns:
-        Discord embed with error information
-    """
-    # Track the error
-    context = {
-        "interaction": interaction,
-        "guild_id": str(interaction.guild.id) if interaction.guild else None,
-        "channel_id": str(interaction.channel.id) if interaction.channel else None,
-        "user_id": str(interaction.user.id) if interaction.user else None,
-        "command": interaction.command.name if hasattr(interaction, 'command') and interaction.command else None
-    }
-    
-    # Determine error category
-    category = categorize_error(error, context)
-    
-    # Track the error
-    error_id = await ErrorTelemetry.track_error(
-        error=error,
-        context=context,
-        category=category
-    )
-    
-    # Get user-friendly message
-    user_message = format_user_friendly_error(error)
-    
-    # Choose template based on category
-    template = ERROR_TEMPLATES.get(category, ERROR_TEMPLATES["default"])
-    
-    # Create embed
-    embed = discord.Embed(
-        title=template["title"],
-        description=template["description"].format(message=user_message),
-        color=template["color"]
-    )
-    
-    # Add error ID to footer if available
-    footer_text = template["footer"].format(
-        error_id=error_id[:8] if error_id else "Unknown",
-        permission=str(error) if isinstance(error, commands.MissingPermissions) else "unknown",
-        resource="item" if not hasattr(error, "resource") else error.resource
-    )
-    embed.set_footer(text=footer_text)
-    
     # Log the error
-    logger.error(f"Command error in {interaction.command.name if hasattr(interaction, 'command') and interaction.command else 'unknown command'}: {error}")
+    command_name = "Unknown command"
+    guild_name = "Unknown guild"
+    channel_name = "Unknown channel"
+    user_name = "Unknown user"
     
-    return embed
-
-async def handle_sftp_error(error: Exception, context: Dict[str, Any] = None) -> dict:
-    """Handle an SFTP operation error
-    
-    Args:
-        error: The exception that occurred
-        context: Optional context information
+    # Extract command and context information based on context type
+    if isinstance(ctx_or_interaction, commands.Context):
+        ctx = ctx_or_interaction
+        command_name = ctx.command.qualified_name if ctx.command else "Unknown command"
+        guild_name = ctx.guild.name if ctx.guild else "DM"
+        channel_name = getattr(ctx.channel, "name", "Unknown")
+        user_name = str(ctx.author)
         
-    Returns:
-        Dictionary with error information
-    """
-    # Default context if none provided
-    if context is None:
-        context = {}
-    
-    # Add SFTP-specific context
-    sftp_context = {
-        "sftp_operation": context.get("operation", "unknown"),
-        **context
-    }
-    
-    # Track the error
-    error_id = await ErrorTelemetry.track_error(
-        error=error,
-        context=sftp_context,
-        category="sftp"
-    )
-    
-    # Get user-friendly message
-    user_message = format_error_for_user(error) if isinstance(error, SFTPError) else format_user_friendly_error(error)
-    
-    # Log the error
-    logger.error(f"SFTP error in {sftp_context.get('operation', 'unknown operation')}: {error}")
-    
-    # Return error information
-    return {
-        "success": False,
-        "error": str(error),
-        "user_message": user_message,
-        "error_id": error_id,
-        "category": "sftp",
-        "timestamp": datetime.utcnow().isoformat()
-    }
-
-async def handle_database_error(error: Exception, context: Dict[str, Any] = None) -> dict:
-    """Handle a database operation error
-    
-    Args:
-        error: The exception that occurred
-        context: Optional context information
-        
-    Returns:
-        Dictionary with error information
-    """
-    # Default context if none provided
-    if context is None:
-        context = {}
-    
-    # Add database-specific context
-    db_context = {
-        "database_operation": context.get("operation", "unknown"),
-        **context
-    }
-    
-    # Track the error
-    error_id = await ErrorTelemetry.track_error(
-        error=error,
-        context=db_context,
-        category="database"
-    )
-    
-    # Get user-friendly message
-    user_message = format_user_friendly_error(error)
-    
-    # Log the error
-    logger.error(f"Database error in {db_context.get('operation', 'unknown operation')}: {error}")
-    
-    # Return error information
-    return {
-        "success": False,
-        "error": str(error),
-        "user_message": user_message,
-        "error_id": error_id,
-        "category": "database",
-        "timestamp": datetime.utcnow().isoformat()
-    }
-
-async def send_error_response(interaction: discord.Interaction, error: Exception, ephemeral: bool = True):
-    """Send an error response to a Discord interaction
-    
-    Args:
-        interaction: Discord interaction
-        error: The exception that occurred
-        ephemeral: Whether the response should be ephemeral
-    """
-    # Create error embed
-    embed = await handle_command_error(interaction, error)
-    
-    # Check if we've already responded
-    try:
-        if interaction.response.is_done():
-            # If already responded, use followup
-            await interaction.followup.send(embed=embed, ephemeral=ephemeral)
-        else:
-            # Otherwise respond directly
-            await interaction.response.send_message(embed=embed, ephemeral=ephemeral)
-    except Exception as e:
-        # If we can't respond, log it
-        logger.error(f"Failed to send error response: {e}")
-
-def error_handler_middleware(func):
-    """Decorator for adding error handling to commands
-    
-    Args:
-        func: The command function to wrap
-        
-    Returns:
-        Wrapped function with error handling
-    """
-    async def wrapper(self, interaction: discord.Interaction, *args, **kwargs):
-        try:
-            # Run the original function
-            return await func(self, interaction, *args, **kwargs)
-        except Exception as error:
-            # Handle the error
-            await send_error_response(interaction, error)
+        # Handle cooldown errors
+        if isinstance(error, commands.CommandOnCooldown):
+            seconds = round(error.retry_after)
+            message = f"This command is on cooldown. Please try again in {seconds} seconds."
+            await ctx.send(message, ephemeral=ephemeral)
+            return True
             
-            # Re-raise if it's a serious error that should stop command processing
-            if isinstance(error, (commands.CommandError, SFTPError)):
-                # These are expected errors, no need to re-raise
-                pass
-            else:
-                # Unexpected error, re-raise for global handlers
-                raise
+        # Handle permission errors
+        elif isinstance(error, commands.MissingPermissions):
+            perms = ", ".join(f"`{p}`" for p in error.missing_permissions)
+            message = f"You need the following permissions to use this command: {perms}"
+            await ctx.send(message, ephemeral=ephemeral)
+            return True
+            
+        # Handle bot permission errors
+        elif isinstance(error, commands.BotMissingPermissions):
+            perms = ", ".join(f"`{p}`" for p in error.missing_permissions)
+            message = f"I need the following permissions to execute this command: {perms}"
+            await ctx.send(message, ephemeral=ephemeral)
+            return True
+            
+        # Handle missing arguments
+        elif isinstance(error, commands.MissingRequiredArgument):
+            message = f"Missing required argument: `{error.param.name}`."
+            usage = f"Usage: `{ctx.prefix}{format_command_signature(ctx.command)}`"
+            await ctx.send(f"{message}\n{usage}", ephemeral=ephemeral)
+            return True
+            
+        # Handle check failures like guild_only
+        elif isinstance(error, commands.NoPrivateMessage) or (
+            isinstance(error, commands.CheckFailure) and 
+            ctx.command and is_guild_only(ctx.command)
+        ):
+            await ctx.send("This command can only be used in a server, not in DMs.", ephemeral=ephemeral)
+            return True
+            
+        # Handle bad arguments
+        elif isinstance(error, commands.BadArgument):
+            message = f"Invalid argument: {str(error)}"
+            await ctx.send(message, ephemeral=ephemeral)
+            return True
+        
+    # Handle interaction-based errors (application commands)
+    elif isinstance(ctx_or_interaction, discord.Interaction):
+        interaction = ctx_or_interaction
+        command_name = getattr(interaction.command, "name", "Unknown command") if hasattr(interaction, "command") else "Unknown command"
+        guild_name = interaction.guild.name if interaction.guild else "DM"
+        channel_name = getattr(interaction.channel, "name", "Unknown") if interaction.channel else "Unknown"
+        user_name = str(interaction.user)
+        
+        # Check if the response has already been sent
+        try:
+            # Special handling for missing permissions in app commands
+            if isinstance(error, discord.app_commands.errors.MissingPermissions):
+                perms = ", ".join(f"`{p}`" for p in getattr(error, "missing_permissions", ["unknown"]))
+                message = f"You need the following permissions to use this command: {perms}"
+                await interaction.response.send_message(message, ephemeral=ephemeral)
+                return True
+                
+            # Handle check failures such as guild_only
+            elif isinstance(error, discord.app_commands.errors.CheckFailure):
+                resource = getattr(error, "resource", None)
+                if resource == "guild":
+                    await interaction.response.send_message("This command can only be used in a server, not in DMs.", ephemeral=ephemeral)
+                    return True
+                    
+            # Handle cooldowns
+            elif hasattr(discord.app_commands, "errors") and hasattr(discord.app_commands.errors, "CommandOnCooldown") and isinstance(error, discord.app_commands.errors.CommandOnCooldown):
+                seconds = round(error.retry_after)
+                message = f"This command is on cooldown. Please try again in {seconds} seconds."
+                await interaction.response.send_message(message, ephemeral=ephemeral)
+                return True
+        except discord.InteractionResponded:
+            # Interaction has already been responded to
+            pass
+            
+    # Log the error with context information
+    error_type = type(error).__name__
+    error_data = get_error_data(error)
     
-    return wrapper
+    logger.error(f"Command error in {guild_name}/{channel_name} by {user_name} for command '{command_name}': {error_type}: {str(error)}")
+    
+    # Log traceback for unexpected errors
+    if "traceback" in error_data:
+        logger.error("".join(error_data["traceback"]))
+    
+    # Return False for unhandled errors, allowing them to propagate
+    return False

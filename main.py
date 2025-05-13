@@ -21,18 +21,43 @@ logger = logging.getLogger("main")
 # Load environment variables
 load_dotenv()
 
-# Apply compatibility patches for py-cord 2.6.1
-logger.info("Applying py-cord 2.6.1 compatibility patches...")
+# Apply comprehensive compatibility patches for py-cord 2.6.1
+logger.info("Applying comprehensive py-cord 2.6.1 compatibility patches...")
 try:
-    # Add direct import compatibility hack for cogs
-    import sys
-    import discord_app_commands
-    sys.modules['discord.app_commands'] = discord_app_commands
+    # Import and apply all compatibility patches from our centralized layer
+    from utils.discord_compat import patch_all, PYCORD_VERSION
+    patch_success = patch_all()
+    logger.info(f"Discord patches applied: {patch_success}, detected version: {PYCORD_VERSION}")
     
-    # Apply all other patches
-    from utils.discord_patches import patch_modules
-    patch_success = patch_modules()
-    logger.info(f"Discord patches applied: {patch_success}")
+    # Set up database connection (will be used by SafeDocument)
+    from utils.safe_mongodb import set_database
+    
+    # Apply MongoDB connection to the global instance
+    async def setup_mongodb():
+        mongodb_uri = os.environ.get("MONGODB_URI")
+        if not mongodb_uri:
+            logger.error("MONGODB_URI not set in environment variables")
+            return False
+            
+        try:
+            # Import Motor and set up connection
+            from motor.motor_asyncio import AsyncIOMotorClient
+            
+            # Create client and connect to database
+            client = AsyncIOMotorClient(mongodb_uri)
+            db = client.get_default_database()
+            
+            # Set the global database instance
+            set_database(db)
+            logger.info("MongoDB connection established successfully")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to connect to MongoDB: {e}")
+            logger.error(traceback.format_exc())
+            return False
+    
+    # We'll call setup_mongodb later in the startup process
+    
 except Exception as e:
     logger.error(f"Failed to apply compatibility patches: {e}")
     logger.error(traceback.format_exc())
@@ -83,8 +108,9 @@ async def load_extensions(bot_instance):
         "cogs.log_processor",  # Fixed Choice class to support subscriptability
         "cogs.player_links",
         # For now, let's keep these disabled until further testing
-        # "cogs.premium_new_fixed",  # Premium features
+        "cogs.premium_new_updated", # Fixed - Updated premium features with compatibility layers
         "cogs.stats_fixed",   # Fixed - Renamed stats command to avoid name conflict
+        "cogs.stats_premium_fix_compat", # Fixed - Premium verification functionality 
         "cogs.help",          # Fixed - Renamed commands method to commands_command
         "cogs.setup_fixed",   # Fixed - Added compatibility with py-cord 2.6.1 guild_only
         "cogs.rivalries_fixed" # Fixed - Added compatibility with py-cord 2.6.1 app_commands
@@ -97,12 +123,12 @@ async def load_extensions(bot_instance):
         # "cogs.log_processor",   # Fixed - Choice class now supports subscriptability
         # "cogs.events",          # Fixed - Added CSV_FIELDS and EVENT_PATTERNS to config
         # "cogs.factions",        # Fixed - Fixed premium_tier_required import path
-        "cogs.premium_new",       # Has indentation issues - using fixed version
-        "cogs.premium_new_fixed", # Has issues with missing premium_mongodb_models dependencies
+        "cogs.premium_new",       # Fixed - Updated as premium_new_updated with proper indentation
+        "cogs.premium_new_fixed", # Fixed - Dependencies issues resolved and using updated premium_new_updated
         "cogs.rivalries",         # Fixed - Added compatibility with py-cord 2.6.1 app_commands
         "cogs.setup",             # Fixed - Added compatibility with py-cord 2.6.1 guild_only
         "cogs.stats",             # Fixed - Command name conflict fixed by renaming to game_stats
-        "cogs.stats_premium_fix"  # Missing setup function, needs reimplementation
+        "cogs.stats_premium_fix"  # Fixed - Reimplemented as stats_premium_fix_compat with setup function
     ]
     
     # Load required cogs
@@ -148,10 +174,16 @@ async def start_bot():
             logger.info("Bot instance already exists, not creating a new one")
             return True
         
+        # Set up MongoDB first (for SafeDocument)
+        mongodb_success = await setup_mongodb()
+        if not mongodb_success:
+            logger.critical("Failed to initialize MongoDB connection. Bot cannot start!")
+            return False
+        
         # Create bot instance
         bot = Bot(production=not dev_mode)
         
-        # Initialize database
+        # Initialize database in bot as well (for backwards compatibility)
         db_success = await bot.init_db()
         if not db_success:
             logger.critical("Failed to initialize database. Bot cannot start!")
