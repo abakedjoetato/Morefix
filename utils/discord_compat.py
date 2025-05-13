@@ -1,222 +1,252 @@
 """
-Discord Compatibility Layer for py-cord 2.6.1
+Discord API Compatibility Layer
 
-This module centralizes all the compatibility layers used to ensure
-the bot works with py-cord 2.6.1 while maintaining compatibility
-with both discord.py codebase and older py-cord versions.
+This module provides compatibility between different versions of discord.py and py-cord.
+It includes unified decorators, helper functions, and proper import proxies to ensure
+code works across different library versions.
 """
 
-import logging
 import sys
-from typing import Dict, Any, Optional, Tuple, List, Union, Callable
+import logging
+import functools
+import inspect
+from typing import Any, Callable, Dict, List, Optional, TypeVar, Union, cast, overload
 
+try:
+    import discord
+    from discord.ext import commands
+    
+    # Check if we're using py-cord by looking for slash_command attribute
+    USING_PYCORD = hasattr(commands.Bot, "slash_command")
+    
+    # Check if we're using py-cord 2.6.1+ with newer imports
+    if USING_PYCORD:
+        try:
+            # Try importing app_commands directly (newer style)
+            import discord.app_commands as app_commands
+            USING_PYCORD_261_PLUS = True
+        except ImportError:
+            # Fall back to the old style if needed
+            from discord import app_commands
+            USING_PYCORD_261_PLUS = False
+    else:
+        # discord.py style - import from discord.ext
+        from discord.ext import commands as app_commands  # type: ignore
+        USING_PYCORD_261_PLUS = False
+        
+except ImportError as e:
+    # Provide better error messages for missing dependencies
+    logging.error(f"Failed to import Discord libraries: {e}")
+    raise ImportError(
+        "Failed to import Discord libraries. Please install discord.py or py-cord:\n"
+        "For py-cord: pip install py-cord>=2.0.0\n"
+        "For discord.py: pip install discord.py>=2.0.0"
+    ) from e
+
+# Type variables for return typing
+T = TypeVar('T')
+CommandT = TypeVar('CommandT')
+
+# Logger for this module
 logger = logging.getLogger(__name__)
 
-# Import discord namespace first
-import discord
+# Version information for debugging
+COMPAT_LAYER_VERSION = "1.0.0"
 
-# Detect py-cord version
-PYCORD_VERSION = "unknown"
-try:
-    PYCORD_VERSION = getattr(discord, "__version__", "0.0.0")
-    _version_parts = [int(x) for x in PYCORD_VERSION.split('.')[:3]]
-    
-    # Check if py-cord 2.6.1+
-    IS_PYCORD_261 = len(_version_parts) >= 3 and tuple(_version_parts) >= (2, 6, 1)
-    
-    logger.info(f"Detected Discord library version: {PYCORD_VERSION}")
-    if IS_PYCORD_261:
-        logger.info("Using py-cord 2.6.1+ compatibility patches")
-except (AttributeError, ValueError, TypeError):
-    IS_PYCORD_261 = False
-    logger.warning("Could not detect Discord library version, assuming older version")
-
-# Import our patch modules
-from utils.discord_patches import patch_all as patch_discord_modules
-
-def is_pycord_261_or_later():
-    """Check if the current discord library is py-cord 2.6.1 or later
+def get_library_info() -> Dict[str, Any]:
+    """Get information about the current Discord library being used.
     
     Returns:
-        bool: True if py-cord 2.6.1+, False otherwise
+        Dict with library name, version, and compatibility details
     """
-    return IS_PYCORD_261
-
-def patch_all() -> bool:
-    """Apply all compatibility patches
+    library_info = {
+        "using_pycord": USING_PYCORD,
+        "using_pycord_261_plus": USING_PYCORD_261_PLUS,
+        "compat_layer_version": COMPAT_LAYER_VERSION,
+    }
     
-    Returns:
-        bool: True if all patches were applied successfully
-    """
-    success = True
-    
-    # Apply discord module patches first
+    # Add version information if available
     try:
-        patch_result = patch_discord_modules()
-        if not patch_result:
-            logger.warning("Discord module patches did not complete successfully")
-            success = False
+        library_info["discord_version"] = discord.__version__
+    except (AttributeError, NameError):
+        library_info["discord_version"] = "unknown"
+        
+    return library_info
+
+# ========== Decorator Compatibility Wrappers ==========
+
+def command(
+    name: Optional[str] = None,
+    description: Optional[str] = None,
+    **kwargs
+) -> Callable[[T], T]:
+    """Unified command decorator that works across py-cord and discord.py.
+    
+    Args:
+        name: Command name
+        description: Command description
+        **kwargs: Additional arguments to pass to the decorator
+        
+    Returns:
+        Command decorator function
+    """
+    def decorator(func: T) -> T:
+        """Wraps a command function with the appropriate decorator."""
+        if USING_PYCORD:
+            if hasattr(commands.Bot, "slash_command"):
+                # py-cord style
+                slash_decorator = commands.slash_command(
+                    name=name,
+                    description=description,
+                    **kwargs
+                )
+                return slash_decorator(func)
+        
+        # discord.py style or fallback
+        app_decorator = app_commands.command(
+            name=name,
+            description=description,
+            **kwargs
+        )
+        return app_decorator(func)
+    
+    return decorator
+
+def describe(**kwargs) -> Callable[[T], T]:
+    """Unified describe decorator for command parameter descriptions.
+    
+    Args:
+        **kwargs: Parameter name to description mapping
+        
+    Returns:
+        Decorator function
+    """
+    def decorator(func: T) -> T:
+        """Wraps a function with the describe decorator."""
+        if USING_PYCORD:
+            # py-cord style
+            if hasattr(app_commands, "describe"):
+                describe_decorator = app_commands.describe(**kwargs)
+                return describe_decorator(func)
+        
+        # discord.py style
+        describe_decorator = app_commands.describe(**kwargs)
+        return describe_decorator(func)
+    
+    return decorator
+
+def guild_only() -> Callable[[T], T]:
+    """Unified guild_only decorator that works across versions.
+    
+    Returns:
+        Decorator function
+    """
+    def decorator(func: T) -> T:
+        """Wraps a function with the guild_only decorator."""
+        if USING_PYCORD:
+            # py-cord style
+            if hasattr(app_commands, "guild_only"):
+                guild_only_decorator = app_commands.guild_only()
+                return guild_only_decorator(func)
+        
+        # discord.py style
+        guild_only_decorator = app_commands.guild_only()
+        return guild_only_decorator(func)
+    
+    return decorator
+
+def choices(**kwargs) -> Callable[[T], T]:
+    """Unified choices decorator for command parameter choices.
+    
+    Args:
+        **kwargs: Parameter name to choices mapping
+        
+    Returns:
+        Decorator function
+    """
+    def decorator(func: T) -> T:
+        """Wraps a function with the choices decorator."""
+        if USING_PYCORD:
+            # py-cord style
+            if hasattr(app_commands, "choices"):
+                choices_decorator = app_commands.choices(**kwargs)
+                return choices_decorator(func)
+        
+        # discord.py style
+        choices_decorator = app_commands.choices(**kwargs)
+        return choices_decorator(func)
+    
+    return decorator
+
+# ========== Attribute Access Safety ==========
+
+def safe_getattr(obj: Any, attr: str, default: Any = None) -> Any:
+    """Safely get an attribute from an object with proper error handling.
+    
+    Args:
+        obj: Object to get attribute from
+        attr: Attribute name to get
+        default: Default value if attribute doesn't exist
+        
+    Returns:
+        Attribute value or default
+    """
+    try:
+        return getattr(obj, attr, default)
     except Exception as e:
-        logger.error(f"Error applying Discord module patches: {e}")
-        success = False
+        logger.debug(f"Error getting attribute {attr} from {obj}: {e}")
+        return default
+
+# ========== Command Group Compatibility ==========
+
+def group(
+    name: Optional[str] = None,
+    description: Optional[str] = None,
+    **kwargs
+) -> Callable[[T], T]:
+    """Unified command group decorator that works across versions.
     
-    # Ensure all imports are patched for module importing by other modules
-    if success:
-        # These are the modules that might be imported by other modules
-        # For each one, ensure it appears in the right namespace
-        try:
-            # Re-export app_commands from our patches
-            if hasattr(discord, "app_commands"):
-                sys.modules['discord.app_commands'] = discord.app_commands
+    Args:
+        name: Group name
+        description: Group description
+        **kwargs: Additional arguments to pass to the decorator
+        
+    Returns:
+        Command group decorator function
+    """
+    def decorator(func: T) -> T:
+        """Wraps a function with the appropriate group decorator."""
+        if USING_PYCORD:
+            # py-cord style
+            if hasattr(commands.Bot, "slash_command"):
+                if USING_PYCORD_261_PLUS and hasattr(commands, "group"):
+                    # py-cord 2.6.1+ style
+                    group_decorator = commands.group(
+                        name=name,
+                        description=description,
+                        **kwargs
+                    )
+                    return group_decorator(func)
+                else:
+                    # Older py-cord style
+                    group_decorator = commands.slash_command(
+                        name=name,
+                        description=description,
+                        **kwargs
+                    )
+                    return group_decorator(func)
                 
-            # Ensure ext.commands namespace is available
-            if hasattr(discord, "ext") and hasattr(discord.ext, "commands"):
-                sys.modules['discord.ext.commands'] = discord.ext.commands
-        except Exception as e:
-            logger.error(f"Error setting up module imports: {e}")
-            success = False
+        # discord.py style
+        from discord.ext.commands import group as ext_group
+        group_decorator = ext_group(
+            name=name,
+            description=description,
+            **kwargs
+        )
+        return group_decorator(func)
     
-    return success
+    return decorator
 
-# Imported functions for command handling
-def get_command_name(command: Any) -> str:
-    """Get the name of a command across different Discord library versions
-    
-    Args:
-        command: Command object from any Discord library
-        
-    Returns:
-        str: Name of the command
-    """
-    if is_pycord_261_or_later():
-        # For py-cord 2.6.1+
-        if hasattr(command, "name"):
-            return command.name
-        elif hasattr(command, "qualified_name"):
-            return command.qualified_name
-    
-    # Fallback for all versions
-    try:
-        return str(command)
-    except:
-        return "unknown_command"
-
-# Improved error handling
-def format_command_signature(command: Any) -> str:
-    """Format a command's signature for error messages
-    
-    Args:
-        command: Command object
-        
-    Returns:
-        str: Formatted command signature
-    """
-    if hasattr(command, "qualified_name"):
-        name = command.qualified_name
-    else:
-        name = get_command_name(command)
-        
-    if hasattr(command, "signature"):
-        signature = command.signature
-    else:
-        signature = ""
-        
-    if signature:
-        return f"{name} {signature}"
-    else:
-        return name
-
-# Functions to handle guild_only properly across versions
-def is_guild_only(command: Any) -> bool:
-    """Check if a command is guild-only across versions
-    
-    Args:
-        command: Command object
-        
-    Returns:
-        bool: True if guild-only, False otherwise
-    """
-    if not command:
-        return False
-        
-    # Check attributes in order of likelihood
-    if hasattr(command, "guild_only"):
-        return bool(command.guild_only)
-    
-    if hasattr(command, "checks"):
-        for check in getattr(command, "checks", []):
-            # Try to find guild_only check function
-            check_name = getattr(check, "__name__", "")
-            if "guild_only" in check_name:
-                return True
-                
-    return False
-
-# Command decorator compatibility
-def command(*args, **kwargs):
-    """Unified command decorator that works across Discord library versions
-    
-    This function provides a consistent interface for command registration
-    that works with both discord.py and py-cord 2.6.1+.
-    
-    Args:
-        *args: Positional arguments to pass to the command decorator
-        **kwargs: Keyword arguments to pass to the command decorator
-        
-    Returns:
-        Function that registers a command
-    """
-    if is_pycord_261_or_later():
-        # For py-cord 2.6.1+, use app_commands.command
-        from utils.discord_patches import app_commands
-        return app_commands.command(*args, **kwargs)
-    else:
-        # For older versions, use discord.ext.commands
-        from discord.ext import commands
-        return commands.command(*args, **kwargs)
-
-# describe decorator compatibility
-def describe(**kwargs):
-    """Unified describe decorator that works across Discord library versions
-    
-    This function provides a consistent interface for command parameter descriptions
-    that works with both discord.py and py-cord 2.6.1+.
-    
-    Args:
-        **kwargs: Parameter descriptions
-        
-    Returns:
-        Function that adds descriptions to a command
-    """
-    if is_pycord_261_or_later():
-        # For py-cord 2.6.1+, use app_commands.describe
-        from utils.discord_patches import app_commands
-        return app_commands.describe(**kwargs)
-    else:
-        # For older versions, this might be a no-op or use a different mechanism
-        def decorator(func):
-            # Store descriptions for potential use by help commands
-            if not hasattr(func, "_parameter_descriptions"):
-                func._parameter_descriptions = {}
-            func._parameter_descriptions.update(kwargs)
-            return func
-        return decorator
-
-# guild_only decorator compatibility
-def guild_only():
-    """Unified guild_only decorator that works across Discord library versions
-    
-    This function provides a consistent interface for marking commands as guild-only
-    that works with both discord.py and py-cord 2.6.1+.
-    
-    Returns:
-        Function that marks a command as guild-only
-    """
-    if is_pycord_261_or_later():
-        # For py-cord 2.6.1+, use app_commands.guild_only
-        from utils.discord_patches import app_commands
-        return app_commands.guild_only()
-    else:
-        # For older versions, use discord.ext.commands.guild_only
-        from discord.ext import commands
-        return commands.guild_only()
+# Add alias for backward compatibility
+slash_command = command
+slash_group = group

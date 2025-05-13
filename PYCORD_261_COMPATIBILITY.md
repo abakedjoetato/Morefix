@@ -1,242 +1,273 @@
-# py-cord 2.6.1 Compatibility Guide
+# Pycord 2.6.1 Compatibility Guide
 
-This document explains the fixes and compatibility solutions implemented for py-cord 2.6.1 in the Tower of Temptation Discord bot.
+This guide documents all the compatibility layers implemented to ensure the Tower of Temptation Discord bot works properly with Pycord 2.6.1 and maintains backwards compatibility.
 
-## Core Issues Fixed
+## Table of Contents
 
-### 1. Command Compatibility
+1. [Introduction](#introduction)
+2. [MongoDB Compatibility](#mongodb-compatibility)
+3. [Discord API Compatibility](#discord-api-compatibility)
+4. [Command System Compatibility](#command-system-compatibility)
+5. [Async/Await & Type Safety](#asyncawait--type-safety)
+6. [Event System & Intent Compatibility](#event-system--intent-compatibility)
+7. [Final Integration](#final-integration)
+8. [Troubleshooting](#troubleshooting)
 
-#### SlashCommand._parse_options Method
+## Introduction
 
-The original issue causing "'list' object has no attribute 'items'" has been fixed by properly subclassing SlashCommand and overriding the _parse_options method. This ensures correct parameter handling for both list-style options (used in newer py-cord versions) and dict-style options (used in older versions).
+Pycord 2.6.1 introduces several breaking changes that require compatibility layers for seamless integration. This document outlines all the compatibility modules created to address these changes.
 
-#### Option Type Annotations
+## MongoDB Compatibility
 
-Fixed LSP typing issues with option annotations by:
-- Separating parameter definitions from type annotations
-- Using a parameter builder approach instead of inline option definitions
-- Applying options after function definition using the add_parameter_options helper
+### SafeMongoDBResult
 
-#### Command Registration
-
-Ensured proper command registration by:
-- Properly handling command signatures with context parameters
-- Creating properly typed subclasses of SlashCommand
-- Properly forwarding parameters to parent class implementations
-
-#### Command Decorator Compatibility
-
-Added compatibility decorators for seamless usage across versions:
-- `command()` - Unified decorator for registering commands
-- `describe()` - Unified decorator for parameter descriptions
-- `guild_only()` - Unified decorator for guild-only commands
-
-### 2. Discord API Compatibility
-
-#### Interaction Response Handling
-
-Added compatibility layer for interaction responses:
-- `safely_respond_to_interaction()` - Safe response function with fallbacks
-- `hybrid_send()` - Unified sending function for both Context and Interaction
-
-#### Attribute Access Safety
-
-Implemented safer attribute access in event handlers:
-- Using `getattr()` with proper defaults for server object attributes
-- Proper exception handling for Discord gateway events
-
-### 3. MongoDB Compatibility
-
-#### Collection Access Pattern
-
-Fixed collection access pattern with compatibility handling:
-- Added `get_collection()` method with multiple access pattern support
-- Dictionary-style, property-style, and method-style access compatibility
-- Proper error handling for collection access failures
-
-#### MongoDB Result Handling
-
-Implemented `SafeMongoDBResult` for consistent result access:
-- Property access compatibility across Motor and PyMongo
-- Consistent method naming and behavior across versions
-- Boolean evaluation for simplified success checking
-
-#### BSON Data Types Handling
-
-Added specialized handling for BSON data types:
-- Safe conversion of MongoDB DateTime types to Python datetime
-- Serialization and deserialization with type compatibility
-- Nested BSON type handling for complex documents
-
-### 4. Premium Feature Verification
-
-Enhanced the premium verification system to:
-- Use proper guild-based verification (never user-based)
-- Support tier-based access control with feature mapping
-- Implement safe database access with proper error handling
-- Replace monkey patching with proper import proxies
-
-## File Structure
-
-### Discord API Compatibility
-
-- **utils/discord_compat.py**: Main compatibility layer for Discord API functionality
-- **utils/interaction_handlers.py**: Compatibility for interaction responses
-- **cogs/setup_fixed.py**: Fixed version of setup commands with proper decorators
-- **cogs/help.py**: Fixed help command system with async/await correctness
-
-### MongoDB Compatibility
-
-- **utils/safe_mongodb.py**: Safe MongoDB document handling with compatibility
-- **utils/mongo_compat.py**: Utilities for BSON data type compatibility
-- **test_safe_mongodb_compat.py**: Tests for MongoDB compatibility layers
-- **test_mongo_compat.py**: Tests for BSON data type compatibility
-
-### Command System Fixes
-
-- **utils/command_handlers.py**: Implements EnhancedSlashCommand with proper _parse_options method
-- **utils/command_imports.py**: Safely imports command components with version detection
-- **utils/command_parameter_builder.py**: Builds command parameters without LSP typing issues
-- **utils/command_examples.py**: Demonstrates proper usage of the enhanced system
-
-### Database Access Improvements
-
-- **utils/safe_database.py**: Provides safe database operations with proper error handling
-
-### Premium System Improvements
-
-- **utils/premium_verification.py**: Core premium feature verification system
-- **utils/premium_import_proxy.py**: Clean import interface for backward compatibility
-- **utils/exceptions.py**: Custom exceptions for premium-related errors
-
-### Error Handling
-
-- Improved error handling in bot.py for both standard and application commands
-- Added structured exception system in utils/exceptions.py
-- Enhanced error messages for premium access failures
-
-## Usage Examples
-
-### Discord Compatibility Layer
+The `SafeMongoDBResult` class provides a consistent interface for accessing MongoDB operation results across different versions:
 
 ```python
-# Import unified decorators
-from utils.discord_compat import command, describe, guild_only
+from utils.safe_mongodb import SafeMongoDBResult
 
-class MyCog(commands.Cog):
-    @command()
-    @describe(option1="First option", option2="Second option")
-    @guild_only()
-    async def my_command(self, ctx, option1=None, option2=None):
-        # Command implementation that works on all versions
-        pass
+# Example usage
+result = collection.insert_one(document)
+safe_result = SafeMongoDBResult(result)
+
+# Access attributes safely
+if safe_result.acknowledged:
+    print(f"Inserted document with ID: {safe_result.inserted_id}")
 ```
 
-### Interaction Response Handling
+### SafeDocument
+
+The `SafeDocument` class provides attribute-style access to MongoDB documents:
 
 ```python
-from utils.interaction_handlers import safely_respond_to_interaction, hybrid_send
+from utils.safe_mongodb import SafeDocument, safe_find_one
 
-# Handle interactions safely
-async def handle_interaction(interaction):
-    # Works with both responded and new interactions
-    await safely_respond_to_interaction(
-        interaction,
-        content="Response content",
-        embed=embed,
-        ephemeral=True
-    )
-    
-# Send messages to either Context or Interaction
-async def send_response(ctx_or_interaction):
-    # Works with both command Context and Interactions
-    await hybrid_send(
-        ctx_or_interaction,
-        content="Response content",
-        embed=embed
-    )
+# Example usage
+document = await safe_find_one(collection, {"user_id": 123})
+safe_doc = SafeDocument(document)
+
+# Access attributes safely
+print(f"User name: {safe_doc.name}")
 ```
 
-### Safe MongoDB Document Handling
+### Collection Access
+
+Use the `get_collection` function for consistent collection access:
 
 ```python
-from utils.safe_mongodb import SafeDocument
-from utils.mongo_compat import safe_serialize_for_mongodb
+from utils.safe_mongodb import get_collection
 
-class Guild(SafeDocument):
-    collection_name = "guilds"
-    
-    def __init__(self, _id=None, name=None, settings=None):
-        super().__init__(_id)
-        self.name = name
-        self.settings = settings or {}
-        
-    # These methods automatically use the compatibility layers
-    async def save(self):
-        await super().save()
-        
-    @classmethod
-    async def get_by_guild_id(cls, guild_id):
-        # Handles collection access consistently across versions
-        # Also deserializes BSON types correctly
-        return await cls.find_one({"_id": str(guild_id)})
+# Example usage
+collection = get_collection(db, "users")
 ```
+
+### BSON Data Type Handling
+
+The `mongo_compat` module provides utilities for handling BSON data types:
+
+```python
+from utils.mongo_compat import serialize_document, deserialize_document
+
+# Example usage
+serialized = serialize_document(document)  # Convert for storage
+deserialized = deserialize_document(serialized)  # Convert back for use
+```
+
+## Discord API Compatibility
+
+### Centralized Imports
+
+Use the `discord_compat` module for all Discord-related imports:
+
+```python
+from utils.discord_compat import discord, commands, app_commands
+```
+
+### Attribute Access
+
+Use the attribute access helpers for accessing Discord object attributes safely:
+
+```python
+from utils.attribute_access import safe_server_getattr, safe_member_getattr
+
+# Example usage
+server_name = safe_server_getattr(server, "name", "Unknown Server")
+member_id = safe_member_getattr(member, "id")
+```
+
+### Interaction Handling
+
+Use the `hybrid_send` function to send messages to either Context or Interaction:
+
+```python
+from utils.interaction_handlers import hybrid_send
+
+# Example usage
+await hybrid_send(ctx_or_interaction, content="Hello!", ephemeral=True)
+```
+
+## Command System Compatibility
 
 ### Enhanced Slash Commands
 
+Use the `EnhancedSlashCommand` class for compatible slash commands:
+
 ```python
-@enhanced_slash_command(
-    name="example_command",
-    description="Example command description"
+from utils.command_handlers import enhanced_slash_command
+
+# Example usage
+@enhanced_slash_command(name="hello", description="A friendly greeting")
+async def hello(ctx):
+    await ctx.send("Hello!")
+```
+
+### Command Options
+
+Use the option builder functions for command parameters:
+
+```python
+from utils.command_handlers import text_option, integer_option
+
+# Example usage
+@enhanced_slash_command(name="echo")
+async def echo(ctx, text=text_option("text", "Text to echo", required=True)):
+    await ctx.send(text)
+```
+
+### Command Builder
+
+Use the `CommandBuilder` for more complex commands:
+
+```python
+from utils.command_parameter_builder import CommandBuilder
+
+# Example usage
+builder = CommandBuilder(
+    name="test",
+    description="Test command",
+    callback=my_callback_function
 )
-async def example_command(self, ctx, param1=None, param2=None):
-    # Command implementation
+builder.add_string_parameter(name="text", description="Text to display")
+command = builder.build()
+```
+
+## Async/Await & Type Safety
+
+### Async Helpers
+
+Use the async helpers for better async function handling:
+
+```python
+from utils.async_helpers import ensure_async, ensure_sync, safe_gather
+
+# Example usage
+sync_func_as_async = ensure_async(sync_function)
+result = await sync_func_as_async()
+
+results = await safe_gather(coro1(), coro2(), return_exceptions=True)
+```
+
+### AsyncCache
+
+Use the `AsyncCache` for caching async function results:
+
+```python
+from utils.async_helpers import AsyncCache, cached_async
+
+# Example usage
+cache = AsyncCache(ttl=300.0)  # 5 minutes TTL
+
+@cached_async(ttl=300.0)
+async def fetch_data(user_id):
+    # Expensive operation
+    return data
+```
+
+### Type Safety
+
+Use the type safety utilities for safer type handling:
+
+```python
+from utils.type_safety import safe_cast, safe_int, safe_str
+
+# Example usage
+user_id = safe_int(user_id_str, default=0)
+username = safe_str(username_obj, max_length=32)
+```
+
+## Event System & Intent Compatibility
+
+### Intent Helpers
+
+Use the intent helpers for compatible Discord intents:
+
+```python
+from utils.intent_helpers import get_default_intents, create_intents
+
+# Example usage
+intents = get_default_intents()  # Get default intents with message_content
+custom_intents = create_intents(guilds=True, members=True, guild_messages=True)
+```
+
+### Permission Helpers
+
+Use the permission helpers for handling Discord permissions:
+
+```python
+from utils.permission_helpers import has_permission, format_permissions
+
+# Example usage
+if has_permission(member.guild_permissions, "manage_messages"):
+    # Allow the action
     pass
 
-# Add parameters separately
-add_parameter_options(example_command, {
-    'param1': text_option(name="param1", description="First parameter", required=True),
-    'param2': number_option(name="param2", description="Second parameter", required=False)
-})
+perm_text = format_permissions(member.guild_permissions)
 ```
 
-### Premium Feature Access
+### Event Dispatcher
+
+Use the `CompatibleBot` for better event handling:
 
 ```python
-from utils.premium_verification import premium_feature_required
+from utils.event_helpers import CompatibleBot
 
-@enhanced_slash_command(
-    name="premium_feature",
-    description="A premium feature command"
-)
-@premium_feature_required("feature_name")
-async def premium_feature_command(self, ctx):
-    # Command implementation that requires premium access
+# Example usage
+bot = CompatibleBot(command_prefix="!", intents=intents)
+
+@bot.event
+async def on_message(message):
+    # Handle message
     pass
 ```
 
-### Safe Database Access
+## Final Integration
 
-```python
-from utils.safe_database import get_document_safely, safely_update_document
+To fully integrate all compatibility layers:
 
-async def safe_db_operation(db, guild_id):
-    # Safely get a document
-    guild_doc = await get_document_safely(db.guilds, {"guild_id": str(guild_id)})
-    
-    if guild_doc:
-        # Safely update a document
-        await safely_update_document(
-            db.guilds,
-            {"guild_id": str(guild_id)},
-            {"$set": {"last_accessed": datetime.now()}}
-        )
-```
+1. Replace Discord imports with `discord_compat` imports
+2. Use `SafeMongoDBResult` for MongoDB operations
+3. Use attribute access helpers for Discord objects
+4. Use enhanced slash commands for app commands
+5. Use async helpers for asynchronous code
+6. Use type safety utilities for safer type handling
+7. Use intent and permission helpers for Discord intents and permissions
 
-## Implementation Notes
+## Troubleshooting
 
-1. All fixes follow proper OOP principles and avoid monkey patching
-2. The implementation is scalable across multiple guilds and SFTP contexts
-3. Premium checks remain strictly guild-scoped, never user-based
-4. Error handling is comprehensive and user-friendly
-5. Code is properly documented with docstrings
+If you encounter issues with the compatibility layers:
+
+1. Check the import paths for compatibility modules
+2. Ensure all MongoDB operations use the safe result wrapper
+3. Verify attribute access uses the safe attribute helpers
+4. Review Discord API calls for proper interaction handling
+5. Run the comprehensive test suite with `python test_compatibility.py`
+
+For specific component issues, refer to the detailed implementation in the corresponding module:
+
+- MongoDB issues: `utils/safe_mongodb.py` and `utils/mongo_compat.py`
+- Discord API issues: `utils/discord_compat.py` and `utils/attribute_access.py`
+- Command issues: `utils/command_handlers.py` and `utils/command_parameter_builder.py`
+- Async issues: `utils/async_helpers.py`
+- Type issues: `utils/type_safety.py`
+- Event issues: `utils/event_helpers.py`
+- Intent/Permission issues: `utils/intent_helpers.py` and `utils/permission_helpers.py`

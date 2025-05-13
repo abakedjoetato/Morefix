@@ -1,266 +1,374 @@
 """
-Command Handlers for py-cord 2.6.1 Compatibility
+Command Handlers for Discord API Compatibility
 
-This module provides enhanced command decorators and handlers that work
-across different versions of py-cord and discord.py.
+This module provides enhanced command classes and functions to handle
+compatibility issues between different versions of discord.py and py-cord,
+especially for slash commands and application commands.
 """
 
 import logging
-import traceback
-import functools
 import inspect
-from typing import Any, Dict, List, Optional, Union, Callable, TypeVar, Type, cast
+from typing import Any, Callable, Dict, List, Optional, Tuple, TypeVar, Union, cast, get_type_hints
 
-import discord
-from discord.ext import commands
+try:
+    import discord
+    from discord.ext import commands
+    
+    # Check if we're using py-cord by looking for slash_command attribute
+    USING_PYCORD = hasattr(commands.Bot, "slash_command")
+    
+    # Check if we're using py-cord 2.6.1+ with newer imports
+    if USING_PYCORD:
+        try:
+            # Try importing app_commands directly (newer style)
+            import discord.app_commands as app_commands
+            USING_PYCORD_261_PLUS = True
+        except ImportError:
+            # Fall back to the old style if needed
+            from discord import app_commands
+            USING_PYCORD_261_PLUS = False
+            
+        # Get the SlashCommand class from the appropriate place
+        if USING_PYCORD_261_PLUS:
+            from discord.app_commands import SlashCommand
+        else:
+            from discord.commands import SlashCommand
+    else:
+        # discord.py style
+        from discord.app_commands import Command as SlashCommand
+        USING_PYCORD_261_PLUS = False
+        
+except ImportError as e:
+    # Provide better error messages for missing dependencies
+    logging.error(f"Failed to import Discord libraries: {e}")
+    raise ImportError(
+        "Failed to import Discord libraries. Please install discord.py or py-cord:\n"
+        "For py-cord: pip install py-cord>=2.0.0\n"
+        "For discord.py: pip install discord.py>=2.0.0"
+    ) from e
 
-from utils.discord_patches import app_commands
-from utils.interaction_handlers import safely_respond_to_interaction, get_interaction_user
-
+# Setup logger
 logger = logging.getLogger(__name__)
 
-# Type variables for decorator typing
-CommandT = TypeVar('CommandT', bound=Callable)
-FuncT = TypeVar('FuncT', bound=Callable)
+# Type variables for return typing
 T = TypeVar('T')
-P = TypeVar('P')
+CommandT = TypeVar('CommandT')
 
-async def defer_interaction(interaction_or_ctx: Union[discord.Interaction, commands.Context], ephemeral: bool = False) -> bool:
+class EnhancedSlashCommand(SlashCommand):
     """
-    Defer an interaction with py-cord 2.6.1 compatibility
+    Enhanced SlashCommand with compatibility fixes for different py-cord versions.
     
-    Args:
-        interaction_or_ctx: The interaction or context to defer
-        ephemeral: Whether the response should be ephemeral
-        
-    Returns:
-        bool: True if the interaction was deferred, False otherwise
+    This class overrides the _parse_options method to handle both list-style options
+    (used in newer py-cord versions) and dict-style options (used in older versions).
     """
-    try:
-        # Handle different types of interactions/contexts
-        if isinstance(interaction_or_ctx, discord.Interaction):
-            # Handle Interaction objects
-            if hasattr(interaction_or_ctx, 'response') and hasattr(interaction_or_ctx.response, 'defer'):
-                # Check if the interaction is already responded to
-                if hasattr(interaction_or_ctx.response, 'is_done') and callable(interaction_or_ctx.response.is_done):
-                    if not interaction_or_ctx.response.is_done():
-                        await interaction_or_ctx.response.defer(ephemeral=ephemeral)
-                        return True
-                    else:
-                        logger.debug("Interaction already responded to, skipping defer")
-                        return False
-                else:
-                    # No is_done method, try deferring anyway
-                    try:
-                        await interaction_or_ctx.response.defer(ephemeral=ephemeral)
-                        return True
-                    except Exception as e:
-                        logger.debug(f"Error deferring interaction: {e}")
-                        return False
-            else:
-                logger.warning("Cannot find response.defer on interaction")
-                return False
-                
-        elif isinstance(interaction_or_ctx, commands.Context):
-            # For Context objects, respond with "Processing..." if defer not available
+    
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._parameter_descriptions = {}
+        
+    def _parse_options(self, params: Dict[str, Any]) -> Union[Dict[str, Any], List[Dict[str, Any]]]:
+        """
+        Parse command options with compatibility for different parameter styles.
+        
+        Args:
+            params: Parameter dictionary
+            
+        Returns:
+            Either a dict (older style) or list (newer style) of option parameters
+        """
+        # If we're using py-cord 2.6.1+, we need to handle the options differently
+        if USING_PYCORD_261_PLUS:
             try:
-                await interaction_or_ctx.send("Processing...", delete_after=5.0)
-                return True
-            except Exception as e:
-                logger.debug(f"Error sending processing message to Context: {e}")
-                return False
+                # Newer py-cord expects a list of options
+                options = []
                 
+                # Extract the parameters
+                for name, param in params.items():
+                    if name == "self" or name == "ctx":
+                        continue
+                        
+                    option = self._extract_option_params(name, param)
+                    options.append(option)
+                    
+                return options
+            except Exception as e:
+                logger.error(f"Error parsing options in newer py-cord style: {e}")
+                # Fall back to super's implementation
+                return super()._parse_options(params)  # type: ignore
         else:
-            logger.warning(f"Unknown interaction/context type: {type(interaction_or_ctx)}")
-            return False
+            # Older py-cord or discord.py expects a dict of options
+            try:
+                options = {}
+                
+                # Extract the parameters
+                for name, param in params.items():
+                    if name == "self" or name == "ctx":
+                        continue
+                        
+                    option = self._extract_option_params(name, param)
+                    options[name] = option
+                    
+                return options
+            except Exception as e:
+                logger.error(f"Error parsing options in older py-cord style: {e}")
+                # Fall back to super's implementation
+                return super()._parse_options(params)  # type: ignore
+                
+    def _extract_option_params(self, name: str, param: Any) -> Dict[str, Any]:
+        """
+        Extract option parameters from a parameter.
+        
+        Args:
+            name: Parameter name
+            param: Parameter object
             
-    except Exception as e:
-        logger.error(f"Error in defer_interaction: {e}")
-        return False
+        Returns:
+            Dict of option parameters
+        """
+        option = {
+            "name": name,
+            "description": self._parameter_descriptions.get(name, "No description provided"),
+            "required": True,
+        }
+        
+        # Set default if available
+        if param.default is not inspect.Parameter.empty:
+            option["required"] = False
+            option["default"] = param.default
+            
+        # Set type if available
+        if param.annotation is not inspect.Parameter.empty:
+            option["type"] = param.annotation
+            
+        return option
+        
+    def add_parameter_description(self, name: str, description: str) -> None:
+        """
+        Add a description for a parameter.
+        
+        Args:
+            name: Parameter name
+            description: Parameter description
+        """
+        self._parameter_descriptions[name] = description
 
-def enhanced_slash_command(**kwargs):
+# Parameter option builders
+def text_option(name: str, description: str, required: bool = True, default: str = None) -> Dict[str, Any]:
     """
-    Enhanced slash command decorator with compatibility across py-cord versions
+    Create a text option for a slash command.
     
     Args:
-        **kwargs: Keyword arguments to pass to the slash command constructor
+        name: Option name
+        description: Option description
+        required: Whether the option is required
+        default: Default value
         
     Returns:
-        Callable: Slash command decorator
+        Option dictionary
     """
-    def decorator(func: CommandT) -> CommandT:
-        """Inner decorator for slash command"""
+    option = {
+        "name": name,
+        "description": description,
+        "required": required,
+        "type": str,
+    }
+    
+    if default is not None:
+        option["default"] = default
         
-        # Try app_commands.command first (preferred)
-        if hasattr(app_commands, 'command'):
-            cmd = app_commands.command(**kwargs)(func)
-            return cmd
-            
-        # Try commands.slash_command next (py-cord 2.0+)
-        elif hasattr(commands, 'slash_command'):
-            cmd = commands.slash_command(**kwargs)(func)
-            return cmd
-            
-        # Fallback to discord.app_commands.command (discord.py 2.0+)
-        elif hasattr(discord, 'app_commands') and hasattr(discord.app_commands, 'command'):
-            cmd = discord.app_commands.command(**kwargs)(func)
-            return cmd
-            
-        # Final fallback to standard command as last resort
-        else:
-            logger.warning("No slash command decorators found! Falling back to standard command")
-            return commands.command(**kwargs)(func)
-            
-    return decorator
+    return option
 
-def option(**kwargs):
+def number_option(name: str, description: str, required: bool = True, default: float = None) -> Dict[str, Any]:
     """
-    Enhanced option decorator for slash command parameters with cross-version compatibility
+    Create a number option for a slash command.
     
     Args:
-        **kwargs: Option parameters like name, description, etc.
+        name: Option name
+        description: Option description
+        required: Whether the option is required
+        default: Default value
         
     Returns:
-        Callable: Option decorator
+        Option dictionary
     """
-    def decorator(func: FuncT) -> FuncT:
-        # Try app_commands.describe first (preferred)
-        if hasattr(app_commands, 'describe'):
-            return app_commands.describe(**kwargs)(func)
-            
-        # Try to get from discord directly
-        elif hasattr(discord, 'app_commands') and hasattr(discord.app_commands, 'describe'):
-            return discord.app_commands.describe(**kwargs)(func)
-            
-        # In case of failure, return unmodified function
-        return func
+    option = {
+        "name": name,
+        "description": description,
+        "required": required,
+        "type": float,
+    }
+    
+    if default is not None:
+        option["default"] = default
         
-    return decorator
+    return option
 
-def command_handler(
-    name: str = None,
-    description: str = None,
-    guild_only: bool = False,
-    defer: bool = True,
-    ephemeral: bool = False,
-    error_handling: bool = True
-):
+def integer_option(name: str, description: str, required: bool = True, default: int = None) -> Dict[str, Any]:
     """
-    Unified command handler decorator with comprehensive error handling
+    Create an integer option for a slash command.
     
     Args:
-        name: Command name override
+        name: Option name
+        description: Option description
+        required: Whether the option is required
+        default: Default value
+        
+    Returns:
+        Option dictionary
+    """
+    option = {
+        "name": name,
+        "description": description,
+        "required": required,
+        "type": int,
+    }
+    
+    if default is not None:
+        option["default"] = default
+        
+    return option
+
+def boolean_option(name: str, description: str, required: bool = True, default: bool = None) -> Dict[str, Any]:
+    """
+    Create a boolean option for a slash command.
+    
+    Args:
+        name: Option name
+        description: Option description
+        required: Whether the option is required
+        default: Default value
+        
+    Returns:
+        Option dictionary
+    """
+    option = {
+        "name": name,
+        "description": description,
+        "required": required,
+        "type": bool,
+    }
+    
+    if default is not None:
+        option["default"] = default
+        
+    return option
+
+def user_option(name: str, description: str, required: bool = True) -> Dict[str, Any]:
+    """
+    Create a user option for a slash command.
+    
+    Args:
+        name: Option name
+        description: Option description
+        required: Whether the option is required
+        
+    Returns:
+        Option dictionary
+    """
+    return {
+        "name": name,
+        "description": description,
+        "required": required,
+        "type": discord.User,
+    }
+
+def channel_option(name: str, description: str, required: bool = True) -> Dict[str, Any]:
+    """
+    Create a channel option for a slash command.
+    
+    Args:
+        name: Option name
+        description: Option description
+        required: Whether the option is required
+        
+    Returns:
+        Option dictionary
+    """
+    return {
+        "name": name,
+        "description": description,
+        "required": required,
+        "type": discord.abc.GuildChannel,
+    }
+
+def role_option(name: str, description: str, required: bool = True) -> Dict[str, Any]:
+    """
+    Create a role option for a slash command.
+    
+    Args:
+        name: Option name
+        description: Option description
+        required: Whether the option is required
+        
+    Returns:
+        Option dictionary
+    """
+    return {
+        "name": name,
+        "description": description,
+        "required": required,
+        "type": discord.Role,
+    }
+
+def enhanced_slash_command(
+    name: Optional[str] = None,
+    description: Optional[str] = None,
+    **kwargs
+) -> Callable[[T], EnhancedSlashCommand]:
+    """
+    Decorator to create an enhanced slash command with compatibility fixes.
+    
+    Args:
+        name: Command name
         description: Command description
-        guild_only: Whether the command is guild-only
-        defer: Whether to defer the interaction response
-        ephemeral: Whether responses should be ephemeral
-        error_handling: Whether to enable error handling
+        **kwargs: Additional arguments to pass to the command
         
     Returns:
-        Callable: Command handler decorator
+        Command decorator function
     """
-    def decorator(func: CommandT) -> CommandT:
-        @functools.wraps(func)
-        async def wrapper(*args, **kwargs):
-            # Try to get interaction/context
-            interaction_or_ctx = None
-            for arg in args:
-                if isinstance(arg, (discord.Interaction, commands.Context)):
-                    interaction_or_ctx = arg
-                    break
-                    
-            if interaction_or_ctx is None:
-                # No interaction or context found, just call original function
-                return await func(*args, **kwargs)
-                
-            # Check guild_only restriction
-            if guild_only and not getattr(interaction_or_ctx, 'guild', None):
-                # Guild check failed
-                if isinstance(interaction_or_ctx, discord.Interaction):
-                    await safely_respond_to_interaction(
-                        interaction_or_ctx,
-                        "This command can only be used in servers!",
-                        ephemeral=True
-                    )
-                else:
-                    await interaction_or_ctx.send("This command can only be used in servers!")
-                return
-                
-            try:
-                # Defer response if needed
-                if defer:
-                    await defer_interaction(interaction_or_ctx, ephemeral=ephemeral)
-                    
-                # Call original function
-                return await func(*args, **kwargs)
-                
-            except Exception as e:
-                # Handle any errors
-                if error_handling:
-                    await handle_command_error(interaction_or_ctx, e)
-                else:
-                    # Re-raise if error handling is disabled
-                    raise
-                    
-        # Apply command decorators
-        kwargs = {}
-        if name:
-            kwargs['name'] = name
-        if description:
-            kwargs['description'] = description
-            
-        # Apply the enhanced slash command decorator
-        return enhanced_slash_command(**kwargs)(wrapper)
+    def decorator(func: T) -> EnhancedSlashCommand:
+        """
+        Decorator to create an enhanced slash command with compatibility fixes.
         
+        Args:
+            func: Function to wrap
+            
+        Returns:
+            Enhanced slash command
+        """
+        # Get the command name from the function name if not provided
+        cmd_name = name or func.__name__
+        cmd_description = description or func.__doc__ or "No description provided"
+        
+        # Create the command
+        command = EnhancedSlashCommand(
+            func,
+            name=cmd_name,
+            description=cmd_description,
+            **kwargs
+        )
+        
+        return command
+    
     return decorator
 
-async def handle_command_error(ctx_or_interaction, error, custom_message=None):
+def add_parameter_options(command: EnhancedSlashCommand, options: Dict[str, Dict[str, Any]]) -> None:
     """
-    Handle command errors with detailed error information
+    Add parameter options to a command.
     
     Args:
-        ctx_or_interaction: Context or interaction where the error occurred
-        error: The exception that was raised
-        custom_message: Optional custom error message to display
-        
-    Returns:
-        None
+        command: Command to add options to
+        options: Dictionary of parameter name to option parameters
     """
-    # Log the error
-    logger.error(f"Command error: {error}", exc_info=True)
+    # Add parameter descriptions to the command
+    for name, option in options.items():
+        command.add_parameter_description(name, option.get("description", "No description provided"))
+        
+def is_pycord_261_or_later() -> bool:
+    """
+    Check if we're using py-cord 2.6.1 or later.
     
-    # Create error message
-    error_message = custom_message or f"An error occurred: {str(error)}"
-    
-    try:
-        # Determine if this is an interaction or context
-        if isinstance(ctx_or_interaction, discord.Interaction):
-            # Handle Interaction
-            embed = discord.Embed(
-                title="Error",
-                description=error_message,
-                color=discord.Color.red()
-            )
-            
-            # Add traceback if debug mode
-            if logger.level <= logging.DEBUG:
-                tb = ''.join(traceback.format_exception(type(error), error, error.__traceback__))
-                if len(tb) > 1000:
-                    tb = tb[:997] + "..."
-                embed.add_field(name="Debug Info", value=f"```py\n{tb}\n```", inline=False)
-                
-            await safely_respond_to_interaction(ctx_or_interaction, embed)
-            
-        else:
-            # Handle Context
-            embed = discord.Embed(
-                title="Error",
-                description=error_message,
-                color=discord.Color.red()
-            )
-            
-            await ctx_or_interaction.send(embed=embed)
-            
-    except Exception as e:
-        # If error handling fails, just log it
-        logger.error(f"Error while handling command error: {e}", exc_info=True)
+    Returns:
+        True if using py-cord 2.6.1 or later, False otherwise
+    """
+    return USING_PYCORD and USING_PYCORD_261_PLUS
