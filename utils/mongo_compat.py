@@ -1,160 +1,318 @@
 """
-MongoDB Compatibility Utilities
+MongoDB Compatibility Module
 
-This module provides compatibility utilities for working with MongoDB across different
-versions and drivers, particularly focusing on BSON data types like DateTime.
+This module provides compatibility functions for working with MongoDB documents,
+including serialization, deserialization, and ObjectId handling.
 """
 
-import logging
 import json
-from datetime import datetime
-from typing import Any, Dict, List, Optional, Union, Type
+import logging
+import datetime
+from typing import Any, Dict, List, Optional, Tuple, Union, TypeVar, cast
 
+# Import safely to handle different pymongo versions
+try:
+    from bson import ObjectId, json_util
+    from bson.json_util import dumps as bson_dumps
+    from bson.json_util import loads as bson_loads
+except ImportError:
+    # Fallbacks for missing bson module
+    # Define a minimal compatible ObjectId class
+    class ObjectId:
+        def __init__(self, id_str=None):
+            self.id_str = id_str or "000000000000000000000000"
+            
+        def __str__(self):
+            return self.id_str
+            
+        def __repr__(self):
+            return f"ObjectId('{self.id_str}')"
+            
+    # Minimal json_util replacements
+    bson_dumps = json.dumps
+    bson_loads = json.loads
+
+# Setup logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
 logger = logging.getLogger(__name__)
 
-# Common BSON type names for identification
-_DATETIME_TYPE_NAMES = ["datetime", "ISODate", "date"]
+class MongoJSONEncoder(json.JSONEncoder):
+    """JSON encoder that can handle MongoDB-specific types."""
+    
+    def default(self, obj):
+        # Handle ObjectId
+        if isinstance(obj, ObjectId):
+            return str(obj)
+            
+        # Handle datetime
+        if isinstance(obj, datetime.datetime):
+            return {
+                "$date": obj.isoformat()
+            }
+            
+        # Let the parent class handle it
+        return super().default(obj)
 
-def is_bson_datetime(value: Any) -> bool:
-    """Check if a value is or represents a BSON datetime
-
+def is_objectid(value: Any) -> bool:
+    """
+    Check if a value is an ObjectId.
+    
     Args:
         value: The value to check
-
+        
     Returns:
-        bool: True if the value is or represents a BSON datetime
+        Whether the value is an ObjectId
     """
-    # Check for Python datetime 
-    if isinstance(value, datetime):
-        return True
+    if value is None:
+        return False
         
-    # Check for various MongoDB BSON datetime representations
-    if isinstance(value, dict) and "$date" in value:
-        return True
-        
-    # Check for class name hinting at datetime
-    if hasattr(value, "__class__") and hasattr(value.__class__, "__name__"):
-        class_name = value.__class__.__name__.lower()
-        return any(dt_name in class_name for dt_name in _DATETIME_TYPE_NAMES)
-        
-    return False
+    return isinstance(value, ObjectId)
 
-def safe_convert_to_datetime(value: Any) -> datetime:
-    """Convert a value to a Python datetime object with compatibility handling
-
+def to_object_id(id_value: Any) -> Optional[Any]:
+    """
+    Convert a value to an ObjectId.
+    
     Args:
-        value: The value to convert (BSON datetime, dict with $date, etc.)
-
+        id_value: The value to convert
+        
     Returns:
-        datetime: Converted Python datetime object
+        The ObjectId or None if conversion fails
     """
-    # If it's already a datetime, just return it
-    if isinstance(value, datetime):
+    if id_value is None:
+        return None
+        
+    if is_objectid(id_value):
+        return id_value
+        
+    try:
+        return ObjectId(str(id_value))
+    except Exception as e:
+        logger.debug(f"Error converting to ObjectId: {e}")
+        return None
+
+def is_bson_datetime(value: Any) -> bool:
+    """
+    Check if a value is a BSON datetime.
+    
+    Args:
+        value: The value to check
+        
+    Returns:
+        Whether the value is a BSON datetime
+    """
+    if not isinstance(value, dict):
+        return False
+        
+    return "$date" in value and len(value) == 1
+
+def safe_convert_to_datetime(value: Any) -> Optional[datetime.datetime]:
+    """
+    Safely convert a value to a datetime.
+    
+    Args:
+        value: The value to convert
+        
+    Returns:
+        The datetime or None if conversion fails
+    """
+    if value is None:
+        return None
+        
+    if isinstance(value, datetime.datetime):
         return value
         
-    # Handle dict representation with $date (common in extended JSON)
     if isinstance(value, dict) and "$date" in value:
-        date_value = value["$date"]
-        
-        # Handle $date as milliseconds timestamp
-        if isinstance(date_value, (int, float)):
-            return datetime.fromtimestamp(date_value / 1000.0)
+        try:
+            date_str = value["$date"]
+            if isinstance(date_str, str):
+                return datetime.datetime.fromisoformat(date_str)
+        except Exception as e:
+            logger.debug(f"Error converting to datetime: {e}")
             
-        # Handle $date as ISO string
-        if isinstance(date_value, str):
-            return datetime.fromisoformat(date_value.replace("Z", "+00:00"))
+    if isinstance(value, str):
+        try:
+            return datetime.datetime.fromisoformat(value)
+        except Exception as e:
+            logger.debug(f"Error converting string to datetime: {e}")
+            
+    if isinstance(value, (int, float)):
+        try:
+            return datetime.datetime.fromtimestamp(value)
+        except Exception as e:
+            logger.debug(f"Error converting timestamp to datetime: {e}")
+            
+    return None
+
+def handle_datetime(value: Any) -> Any:
+    """
+    Handle datetime values for MongoDB compatibility.
     
-    # Attempt to extract timestamp if it has a timestamp attribute/method
-    if hasattr(value, "timestamp"):
-        if callable(value.timestamp):
-            return datetime.fromtimestamp(value.timestamp())
-        return datetime.fromtimestamp(value.timestamp)
-    
-    # Try extracting datetime representation from object attributes
-    for attr in ["datetime", "date", "time", "value"]:
-        if hasattr(value, attr):
-            attr_value = getattr(value, attr)
-            if isinstance(attr_value, datetime):
-                return attr_value
-            elif isinstance(attr_value, (int, float)):
-                return datetime.fromtimestamp(attr_value / 1000.0)
-    
-    # Last resort, convert to string and parse
-    try:
-        if hasattr(value, "__str__"):
-            str_value = str(value)
-            return datetime.fromisoformat(str_value.replace("Z", "+00:00"))
-    except (ValueError, TypeError):
-        pass
+    Args:
+        value: The value to handle
         
-    # If all else fails, return current time and log warning
-    logger.warning(f"Could not convert {value} ({type(value)}) to datetime, using current time instead")
-    return datetime.now()
+    Returns:
+        The handled value
+    """
+    if isinstance(value, datetime.datetime):
+        return value
+        
+    return safe_convert_to_datetime(value)
+
+def serialize_document(document: Dict[str, Any], convert_objectids: bool = True) -> Dict[str, Any]:
+    """
+    Serialize a document for MongoDB storage.
+    
+    Args:
+        document: The document to serialize
+        convert_objectids: Whether to convert string IDs to ObjectIds
+        
+    Returns:
+        The serialized document
+    """
+    if document is None:
+        return {}
+        
+    result = {}
+    
+    for key, value in document.items():
+        # Handle ObjectId fields specially
+        if key == "_id" and convert_objectids and value is not None and not is_objectid(value):
+            result[key] = to_object_id(value)
+        # Handle nested dictionaries
+        elif isinstance(value, dict):
+            result[key] = serialize_document(value, convert_objectids)
+        # Handle lists
+        elif isinstance(value, list):
+            result[key] = [
+                serialize_document(item, convert_objectids) if isinstance(item, dict) else item
+                for item in value
+            ]
+        # Handle datetime
+        elif isinstance(value, datetime.datetime):
+            result[key] = value
+        # Other values pass through
+        else:
+            result[key] = value
+            
+    return result
+
+def deserialize_document(document: Dict[str, Any], convert_objectids: bool = True) -> Dict[str, Any]:
+    """
+    Deserialize a document from MongoDB storage.
+    
+    Args:
+        document: The document to deserialize
+        convert_objectids: Whether to convert ObjectIds to strings
+        
+    Returns:
+        The deserialized document
+    """
+    if document is None:
+        return {}
+        
+    result = {}
+    
+    for key, value in document.items():
+        # Handle ObjectId fields specially
+        if convert_objectids and is_objectid(value):
+            result[key] = str(value)
+        # Handle BSON datetime
+        elif is_bson_datetime(value):
+            result[key] = safe_convert_to_datetime(value)
+        # Handle nested dictionaries
+        elif isinstance(value, dict):
+            result[key] = deserialize_document(value, convert_objectids)
+        # Handle lists
+        elif isinstance(value, list):
+            result[key] = [
+                deserialize_document(item, convert_objectids) if isinstance(item, dict) else item
+                for item in value
+            ]
+        # Other values pass through
+        else:
+            result[key] = value
+            
+    return result
+
+def filter_document(document: Dict[str, Any], fields: List[str]) -> Dict[str, Any]:
+    """
+    Filter a document to include only specified fields.
+    
+    Args:
+        document: The document to filter
+        fields: The fields to include
+        
+    Returns:
+        The filtered document
+    """
+    if document is None:
+        return {}
+        
+    return {
+        key: value for key, value in document.items()
+        if key in fields
+    }
 
 def safe_serialize_for_mongodb(data: Any) -> Any:
-    """Safely serialize data for MongoDB storage, handling special types
-
+    """
+    Safely serialize data for MongoDB storage.
+    
     Args:
         data: The data to serialize
-
+        
     Returns:
-        Any: Properly serialized data for MongoDB storage
+        The serialized data
     """
     if data is None:
         return None
         
-    # Handle common collection types
-    if isinstance(data, list):
-        return [safe_serialize_for_mongodb(item) for item in data]
-        
-    if isinstance(data, dict):
-        return {k: safe_serialize_for_mongodb(v) for k, v in data.items()}
-        
-    # Handle datetime specifically
-    if isinstance(data, datetime):
-        return data  # MongoDB driver will handle this correctly
-        
-    # Handle objects with standard serialization methods
-    if hasattr(data, "to_dict"):
-        return safe_serialize_for_mongodb(data.to_dict())
-        
-    if hasattr(data, "__dict__"):
-        return safe_serialize_for_mongodb(data.__dict__)
-        
-    # Return primitive types as-is (MongoDB can store them directly)
-    if isinstance(data, (str, int, float, bool)):
+    try:
+        if isinstance(data, dict):
+            return serialize_document(data)
+        elif isinstance(data, list):
+            return [serialize_document(item) if isinstance(item, dict) else item for item in data]
+        else:
+            # Attempt to serialize through JSON
+            json_str = json.dumps(data, cls=MongoJSONEncoder)
+            parsed = json.loads(json_str)
+            return serialize_document(parsed) if isinstance(parsed, dict) else parsed
+    except Exception as e:
+        logger.error(f"Error serializing for MongoDB: {e}")
+        # Return the original data as a fallback
         return data
-        
-    # Convert anything else to string
-    return str(data)
 
 def safe_deserialize_from_mongodb(data: Any) -> Any:
-    """Safely deserialize data from MongoDB, handling special types
-
+    """
+    Safely deserialize data from MongoDB storage.
+    
     Args:
-        data: The data from MongoDB to deserialize
-
+        data: The data to deserialize
+        
     Returns:
-        Any: Properly deserialized data
+        The deserialized data
     """
     if data is None:
         return None
         
-    # Handle BSON datetime type
-    if is_bson_datetime(data):
-        return safe_convert_to_datetime(data)
-        
-    # Handle common collection types
-    if isinstance(data, list):
-        return [safe_deserialize_from_mongodb(item) for item in data]
-        
-    if isinstance(data, dict):
-        # Special case for datetime extended JSON
-        if "$date" in data and len(data) == 1:
-            return safe_convert_to_datetime(data)
-            
-        # Regular dictionary processing
-        return {k: safe_deserialize_from_mongodb(v) for k, v in data.items()}
-        
-    # Return primitive types as-is
-    return data
+    try:
+        if isinstance(data, dict):
+            return deserialize_document(data)
+        elif isinstance(data, list):
+            return [deserialize_document(item) if isinstance(item, dict) else item for item in data]
+        else:
+            # Try to serialize and then deserialize through bson
+            if bson_dumps and bson_loads:
+                json_str = bson_dumps(data)
+                parsed = bson_loads(json_str)
+                return deserialize_document(parsed) if isinstance(parsed, dict) else parsed
+            else:
+                # Fallback to regular JSON
+                json_str = json.dumps(data, cls=MongoJSONEncoder)
+                return json.loads(json_str)
+    except Exception as e:
+        logger.error(f"Error deserializing from MongoDB: {e}")
+        # Return the original data as a fallback
+        return data

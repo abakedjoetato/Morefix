@@ -1,142 +1,101 @@
 """
-Type Safety Module for Discord API Compatibility
+Type Safety Utilities
 
-This module provides utilities for safely working with types across
-different versions of Python and Discord libraries.
+This module provides type safety utilities to ensure safe type conversions
+and function calls across different Python versions.
 """
 
 import inspect
 import logging
-import re
 import traceback
-from typing import Any, Callable, Dict, List, Optional, Tuple, TypeVar, Union, cast, get_type_hints
+from typing import Any, Dict, List, Optional, Tuple, Union, TypeVar, Callable, Type, cast, get_type_hints
 
-# Setup logger
+# Setup logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
 logger = logging.getLogger(__name__)
 
-# Type variables for return typing
 T = TypeVar('T')
 
-def safe_cast(value: Any, target_type: Any, default: Optional[T] = None) -> Union[Any, T]:
+def safe_cast(value: Any, target_type: Type[T], default: Optional[T] = None) -> Optional[T]:
     """
     Safely cast a value to a target type.
     
     Args:
-        value: Value to cast
-        target_type: Type to cast to
-        default: Default value to return if casting fails
+        value: The value to cast
+        target_type: The type to cast to
+        default: The default value to return if casting fails
         
     Returns:
-        Cast value, or default if casting fails
+        The cast value or the default
     """
     if value is None:
         return default
         
     try:
-        # Handle built-in types
-        if target_type in (str, int, float, bool):
-            return target_type(value)
+        if target_type == bool and isinstance(value, str):
+            # Handle boolean string conversion specially
+            return cast(T, value.lower() in ('true', 'yes', 'y', '1', 'on'))
             
-        # Handle list type
-        if getattr(target_type, "__origin__", None) is list:
-            item_type = getattr(target_type, "__args__", [Any])[0]
-            if isinstance(value, list):
-                return [safe_cast(item, item_type, item) for item in value]
-            else:
-                return default
-                
-        # Handle dict type
-        if getattr(target_type, "__origin__", None) is dict:
-            key_type = getattr(target_type, "__args__", [Any, Any])[0]
-            value_type = getattr(target_type, "__args__", [Any, Any])[1]
-            if isinstance(value, dict):
-                return {
-                    safe_cast(k, key_type, k): safe_cast(v, value_type, v)
-                    for k, v in value.items()
-                }
-            else:
-                return default
-                
-        # Handle union type
-        if getattr(target_type, "__origin__", None) is Union:
-            for union_type in getattr(target_type, "__args__", []):
-                try:
-                    return safe_cast(value, union_type)
-                except (ValueError, TypeError):
-                    continue
-                    
-            return default
-            
-        # Handle instance check
-        if isinstance(value, target_type):
-            return value
-            
-        # Handle custom casting if possible
-        if hasattr(target_type, "from_dict") and isinstance(value, dict):
-            return target_type.from_dict(value)
-            
-        # Handle direct casting
         return target_type(value)
-    except (ValueError, TypeError) as e:
-        logger.debug(f"Failed to cast {value} to {target_type}: {e}")
+    except Exception as e:
+        logger.debug(f"Error casting {value} to {target_type}: {e}")
         return default
 
-def safe_str(value: Any, max_length: int = 2000) -> str:
+def safe_str(value: Any, default: str = "") -> str:
     """
     Safely convert a value to a string.
     
     Args:
-        value: Value to convert
-        max_length: Maximum string length
+        value: The value to convert
+        default: The default value to return if conversion fails
         
     Returns:
-        String representation of the value
+        The string value or the default
     """
     if value is None:
-        return ""
+        return default
         
     try:
-        result = str(value)
-        
-        # Truncate if necessary
-        if len(result) > max_length:
-            return result[:max_length - 3] + "..."
-            
-        return result
+        return str(value)
     except Exception as e:
-        logger.error(f"Failed to convert {value} to string: {e}")
-        return ""
+        logger.debug(f"Error converting {value} to string: {e}")
+        return default
 
 def safe_int(value: Any, default: int = 0) -> int:
     """
     Safely convert a value to an integer.
     
     Args:
-        value: Value to convert
-        default: Default value
+        value: The value to convert
+        default: The default value to return if conversion fails
         
     Returns:
-        Integer representation of the value
+        The integer value or the default
     """
     if value is None:
         return default
         
     try:
-        # Handle special cases
         if isinstance(value, bool):
-            return 1 if value else 0
-            
-        # Handle string
-        if isinstance(value, str):
-            value = value.strip()
-            
-            # Handle empty string
-            if not value:
-                return default
-                
-        return int(value)
-    except (ValueError, TypeError):
-        logger.debug(f"Failed to convert {value} to int")
+            return int(value)
+        elif isinstance(value, str):
+            # Try to handle common prefixes
+            value = value.strip().lower()
+            if value.startswith('0x'):
+                return int(value, 16)
+            elif value.startswith('0b'):
+                return int(value, 2)
+            elif value.startswith('0o'):
+                return int(value, 8)
+            else:
+                return int(float(value))
+        else:
+            return int(value)
+    except Exception as e:
+        logger.debug(f"Error converting {value} to int: {e}")
         return default
 
 def safe_float(value: Any, default: float = 0.0) -> float:
@@ -144,31 +103,24 @@ def safe_float(value: Any, default: float = 0.0) -> float:
     Safely convert a value to a float.
     
     Args:
-        value: Value to convert
-        default: Default value
+        value: The value to convert
+        default: The default value to return if conversion fails
         
     Returns:
-        Float representation of the value
+        The float value or the default
     """
     if value is None:
         return default
         
     try:
-        # Handle special cases
         if isinstance(value, bool):
-            return 1.0 if value else 0.0
-            
-        # Handle string
-        if isinstance(value, str):
-            value = value.strip()
-            
-            # Handle empty string
-            if not value:
-                return default
-                
-        return float(value)
-    except (ValueError, TypeError):
-        logger.debug(f"Failed to convert {value} to float")
+            return float(value)
+        elif isinstance(value, str):
+            return float(value.strip())
+        else:
+            return float(value)
+    except Exception as e:
+        logger.debug(f"Error converting {value} to float: {e}")
         return default
 
 def safe_bool(value: Any, default: bool = False) -> bool:
@@ -176,329 +128,187 @@ def safe_bool(value: Any, default: bool = False) -> bool:
     Safely convert a value to a boolean.
     
     Args:
-        value: Value to convert
-        default: Default value
+        value: The value to convert
+        default: The default value to return if conversion fails
         
     Returns:
-        Boolean representation of the value
+        The boolean value or the default
     """
     if value is None:
         return default
         
-    # Handle special cases
-    if isinstance(value, str):
-        value = value.strip().lower()
-        
-        # Handle empty string
-        if not value:
-            return default
-            
-        # Handle common string values
-        if value in ("true", "t", "yes", "y", "1"):
-            return True
-            
-        if value in ("false", "f", "no", "n", "0"):
-            return False
-            
-    # Handle numeric values
-    if isinstance(value, (int, float)):
-        return bool(value)
-        
     try:
-        return bool(value)
-    except (ValueError, TypeError):
-        logger.debug(f"Failed to convert {value} to bool")
+        if isinstance(value, str):
+            return value.lower() in ('true', 'yes', 'y', '1', 'on')
+        else:
+            return bool(value)
+    except Exception as e:
+        logger.debug(f"Error converting {value} to bool: {e}")
         return default
 
-def safe_list(value: Any, item_type: Any = Any, default: Optional[List] = None) -> List:
+def safe_list(value: Any, default: Optional[List[Any]] = None) -> List[Any]:
     """
     Safely convert a value to a list.
     
     Args:
-        value: Value to convert
-        item_type: Type of list items
-        default: Default value
+        value: The value to convert
+        default: The default value to return if conversion fails
         
     Returns:
-        List representation of the value
+        The list value or the default
     """
     if default is None:
         default = []
         
     if value is None:
-        return default.copy()
+        return default
         
     try:
-        # Handle string
-        if isinstance(value, str):
-            value = value.strip()
-            
-            # Handle empty string
-            if not value:
-                return default.copy()
-                
-            # Handle JSON-like string
-            if (value.startswith("[") and value.endswith("]")) or \
-               (value.startswith("{") and value.endswith("}")):
-                try:
-                    import json
-                    value = json.loads(value)
-                except Exception:
-                    pass
-                    
-        # Handle dictionary
-        if isinstance(value, dict):
-            value = list(value.items())
-            
-        # Handle iterable
-        if hasattr(value, "__iter__") and not isinstance(value, (str, bytes, dict)):
-            result = list(value)
-            
-            # Cast items if needed
-            if item_type is not Any:
-                result = [safe_cast(item, item_type) for item in result]
-                
-            return result
-            
-        # Handle scalar
-        return [safe_cast(value, item_type) if item_type is not Any else value]
+        if isinstance(value, list):
+            return value
+        elif isinstance(value, tuple):
+            return list(value)
+        elif isinstance(value, dict):
+            return list(value.items())
+        elif isinstance(value, (str, bytes)):
+            # Don't convert strings to lists of characters
+            return [value]
+        else:
+            # Try to convert to list if iterable
+            try:
+                return list(value)
+            except:
+                return [value]
     except Exception as e:
-        logger.debug(f"Failed to convert {value} to list: {e}")
-        return default.copy()
+        logger.debug(f"Error converting {value} to list: {e}")
+        return default
 
-def safe_dict(value: Any, default: Optional[Dict] = None) -> Dict:
+def safe_dict(value: Any, default: Optional[Dict[Any, Any]] = None) -> Dict[Any, Any]:
     """
     Safely convert a value to a dictionary.
     
     Args:
-        value: Value to convert
-        default: Default value
+        value: The value to convert
+        default: The default value to return if conversion fails
         
     Returns:
-        Dictionary representation of the value
+        The dictionary value or the default
     """
     if default is None:
         default = {}
         
     if value is None:
-        return default.copy()
+        return default
         
     try:
-        # Handle string
-        if isinstance(value, str):
-            value = value.strip()
-            
-            # Handle empty string
-            if not value:
-                return default.copy()
-                
-            # Handle JSON-like string
-            if (value.startswith("{") and value.endswith("}")) or \
-               (value.startswith("[") and value.endswith("]")):
-                try:
-                    import json
-                    value = json.loads(value)
-                except Exception:
-                    pass
-                    
-        # Handle dictionary
         if isinstance(value, dict):
-            return dict(value)
-            
-        # Handle list of pairs
-        if isinstance(value, list):
+            return value
+        elif hasattr(value, '_asdict'):  # namedtuple support
+            return value._asdict()
+        elif hasattr(value, '__dict__'):  # class instance support
+            return value.__dict__
+        elif isinstance(value, (list, tuple)):
+            # Try to convert list of pairs to dict
             try:
                 return dict(value)
-            except (ValueError, TypeError):
-                pass
-                
-        # Handle object with attributes
-        if hasattr(value, "__dict__"):
-            return {
-                k: v for k, v in value.__dict__.items()
-                if not k.startswith("_")
-            }
-            
-        # Handle object with to_dict method
-        if hasattr(value, "to_dict") and callable(value.to_dict):
-            return value.to_dict()
-            
-        logger.debug(f"Failed to convert {value} to dict")
-        return default.copy()
+            except:
+                return {i: v for i, v in enumerate(value)}
+        else:
+            # If all else fails, try direct conversion
+            return dict(value)
     except Exception as e:
-        logger.debug(f"Failed to convert {value} to dict: {e}")
-        return default.copy()
+        logger.debug(f"Error converting {value} to dict: {e}")
+        return default
 
-def get_exception_info() -> Tuple[str, str, str]:
+def safe_function_call(func: Callable[..., T], *args, default: Optional[T] = None, **kwargs) -> Optional[T]:
     """
-    Get information about the current exception.
-    
-    Returns:
-        Tuple of (exception type, exception message, traceback)
-    """
-    # Get the exception info
-    exc_type, exc_value, exc_traceback = traceback.exc_info()
-    
-    # Get the exception type name
-    type_name = exc_type.__name__ if exc_type else "Unknown"
-    
-    # Get the exception message
-    message = str(exc_value) if exc_value else "No message"
-    
-    # Get the traceback
-    tb = traceback.format_exception(exc_type, exc_value, exc_traceback)
-    tb_str = "".join(tb)
-    
-    return type_name, message, tb_str
-
-def safe_function_call(
-    func: Callable,
-    *args,
-    default_return: Any = None,
-    log_error: bool = True,
-    **kwargs
-) -> Any:
-    """
-    Safely call a function with proper error handling.
+    Safely call a function with error handling.
     
     Args:
-        func: Function to call
-        *args: Positional arguments
-        default_return: Default return value if the function raises an exception
-        log_error: Whether to log errors
-        **kwargs: Keyword arguments
+        func: The function to call
+        *args: Positional arguments to pass to the function
+        default: The default value to return if the function call fails
+        **kwargs: Keyword arguments to pass to the function
         
     Returns:
-        Function result, or default_return if the function raises an exception
+        The function result or the default
     """
+    if func is None:
+        return default
+        
     try:
         return func(*args, **kwargs)
     except Exception as e:
-        if log_error:
-            logger.error(f"Error calling {func.__name__}: {e}")
-        return default_return
+        logger.error(f"Error calling function {func.__name__}: {e}")
+        logger.debug(traceback.format_exc())
+        return default
 
-def validate_type(value: Any, expected_type: Any) -> bool:
+def validate_type(value: Any, expected_type: Type[T]) -> bool:
     """
-    Validate that a value matches an expected type.
+    Validate that a value is of the expected type.
     
     Args:
-        value: Value to validate
-        expected_type: Expected type
+        value: The value to validate
+        expected_type: The expected type
         
     Returns:
-        True if the value matches the expected type, False otherwise
+        Whether the value is of the expected type
     """
-    # Handle None
     if value is None:
-        return expected_type is type(None) or \
-               getattr(expected_type, "__origin__", None) is Union and \
-               type(None) in getattr(expected_type, "__args__", [])
-               
-    # Handle any type
-    if expected_type is Any:
-        return True
+        return expected_type is type(None)
         
-    # Handle union type
-    if getattr(expected_type, "__origin__", None) is Union:
-        return any(validate_type(value, t) for t in getattr(expected_type, "__args__", []))
-        
-    # Handle list type
-    if getattr(expected_type, "__origin__", None) is list:
-        if not isinstance(value, list):
-            return False
-            
-        # If list is empty, we can't validate item types
-        if not value:
+    try:
+        if expected_type is Any:
             return True
             
-        # Get the expected item type
-        item_type = getattr(expected_type, "__args__", [Any])[0]
-        
-        # Check each item
-        return all(validate_type(item, item_type) for item in value)
-        
-    # Handle dict type
-    if getattr(expected_type, "__origin__", None) is dict:
-        if not isinstance(value, dict):
-            return False
+        # Handle Union types
+        try:
+            origin = getattr(expected_type, '__origin__', None)
+            if origin is Union:
+                args = getattr(expected_type, '__args__', ())
+                return any(validate_type(value, arg) for arg in args)
+        except:
+            pass
             
-        # If dict is empty, we can't validate item types
-        if not value:
-            return True
+        # Handle List, Dict, etc.
+        try:
+            if expected_type == List:
+                return isinstance(value, list)
+            elif expected_type == Dict:
+                return isinstance(value, dict)
+            elif expected_type == Tuple:
+                return isinstance(value, tuple)
+        except:
+            pass
             
-        # Get the expected key and value types
-        key_type = getattr(expected_type, "__args__", [Any, Any])[0]
-        value_type = getattr(expected_type, "__args__", [Any, Any])[1]
-        
-        # Check each key and value
-        return all(
-            validate_type(k, key_type) and validate_type(v, value_type)
-            for k, v in value.items()
-        )
-        
-    # Handle instance check
-    return isinstance(value, expected_type)
+        return isinstance(value, expected_type)
+    except Exception as e:
+        logger.debug(f"Error validating type: {e}")
+        return False
 
-def validate_func_args(
-    func: Callable,
-    *args,
-    **kwargs
-) -> bool:
+def validate_func_args(func: Callable, *args, **kwargs) -> Tuple[bool, Optional[str]]:
     """
-    Validate that arguments match a function's parameter types.
+    Validate function arguments against the function's signature.
     
     Args:
-        func: Function to validate arguments for
-        *args: Positional arguments
-        **kwargs: Keyword arguments
+        func: The function to validate arguments for
+        *args: Positional arguments to validate
+        **kwargs: Keyword arguments to validate
         
     Returns:
-        True if the arguments match the function's parameter types, False otherwise
+        A tuple of (is_valid, error_message)
     """
+    if func is None:
+        return False, "Function is None"
+        
     try:
-        # Get the function's parameter specifications
         sig = inspect.signature(func)
-        
-        # Get the function's type hints
-        hints = get_type_hints(func)
-        
-        # Create a mapping of parameters to arguments
-        bound_args = sig.bind(*args, **kwargs)
-        
-        # Validate each argument
-        for param_name, param in sig.parameters.items():
-            # Skip parameters without type hints
-            if param_name not in hints:
-                continue
-                
-            # Skip parameters not provided in the arguments
-            if param_name not in bound_args.arguments:
-                # If the parameter has a default value, it's okay
-                if param.default is not inspect.Parameter.empty:
-                    continue
-                    
-                # If the parameter is variadic, it's okay
-                if param.kind in (
-                    inspect.Parameter.VAR_POSITIONAL,
-                    inspect.Parameter.VAR_KEYWORD
-                ):
-                    continue
-                    
-                # Otherwise, a required parameter is missing
-                return False
-                
-            # Get the argument value
-            arg_value = bound_args.arguments[param_name]
-            
-            # Get the expected type
-            expected_type = hints[param_name]
-            
-            # Validate the type
-            if not validate_type(arg_value, expected_type):
-                return False
-                
-        return True
+        try:
+            # This will raise if the arguments don't match the signature
+            sig.bind(*args, **kwargs)
+            return True, None
+        except Exception as bind_err:
+            return False, str(bind_err)
     except Exception as e:
-        logger.debug(f"Error validating arguments for {func.__name__}: {e}")
-        return False
+        logger.debug(f"Error validating function arguments: {e}")
+        return False, f"Error validating function arguments: {e}"

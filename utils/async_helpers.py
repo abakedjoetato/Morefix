@@ -1,342 +1,244 @@
 """
-Async Helpers for Discord API Compatibility
+Async Helper Utilities
 
-This module provides helpers for safely working with asynchronous functions
-across different versions of Python and Discord libraries.
+This module provides async/await helper utilities to ensure compatibility
+across different Python versions and Discord libraries.
 """
 
 import asyncio
+import functools
 import inspect
 import logging
-import functools
-from typing import Any, Callable, Coroutine, Dict, List, Optional, TypeVar, Union, cast
+import time
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union, TypeVar, cast, Coroutine
 
-# Setup logger
+# Setup logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
 logger = logging.getLogger(__name__)
 
-# Type variables for return typing
 T = TypeVar('T')
-R = TypeVar('R')
-AsyncCallable = Callable[..., Coroutine[Any, Any, R]]
-SyncCallable = Callable[..., R]
-AnyCallable = Union[AsyncCallable[R], SyncCallable[R]]
+F = TypeVar('F', bound=Callable[..., Any])
+CoroFunc = Callable[..., Coroutine[Any, Any, T]]
 
-def is_coroutine_function(func: Callable) -> bool:
+def is_coroutine_function(func: Callable[..., Any]) -> bool:
     """
     Check if a function is a coroutine function.
     
-    This is a safe wrapper around inspect.iscoroutinefunction that handles
-    edge cases like decorated functions.
-    
     Args:
-        func: Function to check
+        func: The function to check
         
     Returns:
-        True if the function is a coroutine function, False otherwise
+        Whether the function is a coroutine function
     """
-    # First check if the function is a native coroutine function
-    if inspect.iscoroutinefunction(func):
+    if func is None:
+        return False
+        
+    if asyncio.iscoroutinefunction(func):
         return True
         
-    # Check if the function is an async generator
-    if inspect.isasyncgenfunction(func):
-        return True
+    # Unwrap partial functions
+    if isinstance(func, functools.partial):
+        return is_coroutine_function(func.func)
         
-    # Check if the function is a decorated coroutine function
-    if hasattr(func, "__wrapped__"):
-        return is_coroutine_function(func.__wrapped__)
-        
-    # Check for a _is_coroutine attribute (used by discord.py)
-    if hasattr(func, "_is_coroutine") and func._is_coroutine:
-        return True
-        
-    return False
+    # Check inspect
+    return inspect.iscoroutinefunction(func)
 
-def ensure_async(func: AnyCallable[R]) -> AsyncCallable[R]:
+async def ensure_async(func: Callable[..., Any], *args, **kwargs) -> Any:
     """
-    Ensure that a function is async.
-    
-    If the function is already async, it's returned as-is.
-    If the function is sync, it's wrapped in a coroutine.
+    Ensure a function is executed asynchronously.
     
     Args:
-        func: Function to ensure is async
+        func: The function to execute
+        *args: The positional arguments to pass to the function
+        **kwargs: The keyword arguments to pass to the function
         
     Returns:
-        Async version of the function
+        The result of the function
     """
-    if is_coroutine_function(func):
-        return cast(AsyncCallable[R], func)
+    if func is None:
+        return None
         
-    @functools.wraps(func)
-    async def wrapper(*args, **kwargs):
-        return func(*args, **kwargs)
-        
-    return wrapper
+    try:
+        if is_coroutine_function(func):
+            return await func(*args, **kwargs)
+        else:
+            # Run in a thread pool if it's a blocking function
+            loop = asyncio.get_event_loop()
+            return await loop.run_in_executor(
+                None, functools.partial(func, *args, **kwargs)
+            )
+    except Exception as e:
+        logger.error(f"Error ensuring async execution: {e}")
+        return None
 
-def ensure_sync(func: AnyCallable[R]) -> SyncCallable[R]:
+def ensure_sync(func: Callable[..., Any]) -> Callable[..., Any]:
     """
-    Ensure that a function is sync.
-    
-    If the function is already sync, it's returned as-is.
-    If the function is async, it's wrapped to run in the event loop.
+    Ensure a function is executed synchronously.
     
     Args:
-        func: Function to ensure is sync
+        func: The function to wrap
         
     Returns:
-        Sync version of the function
+        A synchronous wrapper function
     """
-    if not is_coroutine_function(func):
-        return cast(SyncCallable[R], func)
+    if func is None:
+        return lambda *args, **kwargs: None
         
     @functools.wraps(func)
     def wrapper(*args, **kwargs):
-        # Get the current event loop
-        try:
-            loop = asyncio.get_event_loop()
-        except RuntimeError:
-            # Create a new event loop if one doesn't exist
+        if is_coroutine_function(func):
+            # Create a new event loop for this thread
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
-            
-        # Run the coroutine in the event loop
-        if loop.is_running():
-            # Create a future for the coroutine
-            future = asyncio.run_coroutine_threadsafe(func(*args, **kwargs), loop)
-            return future.result()
+            try:
+                return loop.run_until_complete(func(*args, **kwargs))
+            finally:
+                loop.close()
         else:
-            # Run the coroutine directly
-            return loop.run_until_complete(func(*args, **kwargs))
+            return func(*args, **kwargs)
             
     return wrapper
 
-async def safe_gather(*coros_or_futures, return_exceptions=False):
+async def safe_gather(*aws, return_exceptions=False) -> List[Any]:
     """
-    Safely gather coroutines or futures.
-    
-    This is a wrapper around asyncio.gather that handles exceptions better
-    and provides better error messages.
+    Safely gather coroutines with proper error handling.
     
     Args:
-        *coros_or_futures: Coroutines or futures to gather
-        return_exceptions: Whether to return exceptions or raise them
+        *aws: The awaitables to gather
+        return_exceptions: Whether to return exceptions instead of raising them
         
     Returns:
-        List of results from the coroutines or futures
+        The results of the awaitables
     """
-    # Filter out None values
-    coros = [c for c in coros_or_futures if c is not None]
-    
-    if not coros:
-        return []
-        
     try:
-        return await asyncio.gather(*coros, return_exceptions=return_exceptions)
+        return await asyncio.gather(*aws, return_exceptions=return_exceptions)
     except Exception as e:
         logger.error(f"Error gathering coroutines: {e}")
         if return_exceptions:
-            return [e] * len(coros)
-        raise
+            return [e] * len(aws)
+        else:
+            raise
 
-async def safe_wait(
-    aws,
-    *,
-    timeout=None,
-    return_when=asyncio.ALL_COMPLETED
-):
+async def safe_wait(aws, timeout=None, return_when=asyncio.ALL_COMPLETED) -> Tuple[set, set]:
     """
-    Safely wait for coroutines to complete.
-    
-    This is a wrapper around asyncio.wait that handles exceptions better
-    and provides better error messages.
+    Safely wait for coroutines with proper error handling.
     
     Args:
-        aws: Coroutines to wait for
-        timeout: Maximum time to wait
-        return_when: When to return (ALL_COMPLETED, FIRST_COMPLETED, FIRST_EXCEPTION)
+        aws: The awaitables to wait for
+        timeout: The timeout in seconds
+        return_when: When to return
         
     Returns:
-        Tuple of (done, pending) sets
+        The done and pending sets
     """
-    # Filter out None values
-    coros = [c for c in aws if c is not None]
-    
-    if not coros:
-        return set(), set()
-        
     try:
-        done, pending = await asyncio.wait(
-            coros,
-            timeout=timeout,
-            return_when=return_when
-        )
-        return done, pending
+        return await asyncio.wait(aws, timeout=timeout, return_when=return_when)
     except Exception as e:
         logger.error(f"Error waiting for coroutines: {e}")
-        return set(), set(coros)
+        return set(), set(aws)
 
 class AsyncCache:
-    """
-    Cache for async function results.
+    """A simple async-compatible cache."""
     
-    This class provides a cache for async function results, with support
-    for TTL (time to live) and automatic invalidation.
-    """
-    
-    def __init__(self, ttl: float = 300.0):
+    def __init__(self, ttl: float = 60.0):
         """
         Initialize the cache.
         
         Args:
-            ttl: Time to live in seconds
+            ttl: The time-to-live in seconds
         """
-        self.cache: Dict[str, Any] = {}
+        self.cache = {}
         self.ttl = ttl
-        self.timestamps: Dict[str, float] = {}
         
-    def get(self, key: str) -> Optional[Any]:
+    async def get(self, key: str) -> Optional[Any]:
         """
         Get a value from the cache.
         
         Args:
-            key: Cache key
+            key: The key to get
             
         Returns:
-            Cached value, or None if not found or expired
+            The value or None
         """
-        # Check if the key exists
         if key not in self.cache:
             return None
             
-        # Check if the value has expired
-        if self.ttl > 0:
-            # Get the timestamp
-            timestamp = self.timestamps.get(key, 0)
-            
-            # Check if the value has expired
-            if timestamp + self.ttl < asyncio.get_event_loop().time():
-                # Remove the expired value
-                del self.cache[key]
-                del self.timestamps[key]
-                return None
-                
-        # Return the cached value
-        return self.cache[key]
+        value, timestamp = self.cache[key]
         
-    def set(self, key: str, value: Any) -> None:
+        # Check if expired
+        if time.time() - timestamp > self.ttl:
+            del self.cache[key]
+            return None
+            
+        return value
+        
+    async def set(self, key: str, value: Any) -> None:
         """
         Set a value in the cache.
         
         Args:
-            key: Cache key
-            value: Value to cache
+            key: The key to set
+            value: The value to set
         """
-        # Set the value
-        self.cache[key] = value
+        self.cache[key] = (value, time.time())
         
-        # Set the timestamp
-        if self.ttl > 0:
-            self.timestamps[key] = asyncio.get_event_loop().time()
-            
-    def delete(self, key: str) -> None:
+    async def get_or_set_async(self, key: str, getter: CoroFunc) -> Any:
         """
-        Delete a value from the cache.
+        Get a value from the cache or set it.
         
         Args:
-            key: Cache key
+            key: The key to get
+            getter: The function to call to get the value
+            
+        Returns:
+            The value
         """
-        # Delete the value
+        value = await self.get(key)
+        if value is not None:
+            return value
+            
+        value = await ensure_async(getter)
+        await self.set(key, value)
+        return value
+        
+    def invalidate(self, key: str) -> None:
+        """
+        Invalidate a cache key.
+        
+        Args:
+            key: The key to invalidate
+        """
         if key in self.cache:
             del self.cache[key]
             
-        # Delete the timestamp
-        if key in self.timestamps:
-            del self.timestamps[key]
-            
     def clear(self) -> None:
-        """
-        Clear the cache.
-        """
-        # Clear the cache and timestamps
+        """Clear the cache."""
         self.cache.clear()
-        self.timestamps.clear()
-        
-    def get_or_set(self, key: str, func: Callable[[], Any]) -> Any:
-        """
-        Get a value from the cache, or set it if not found.
-        
-        Args:
-            key: Cache key
-            func: Function to call if the value is not found
-            
-        Returns:
-            Cached value
-        """
-        # Get the value
-        value = self.get(key)
-        
-        # If the value is not found, set it
-        if value is None:
-            value = func()
-            self.set(key, value)
-            
-        return value
-        
-    async def get_or_set_async(self, key: str, func: Callable[[], Coroutine[Any, Any, Any]]) -> Any:
-        """
-        Get a value from the cache, or set it if not found.
-        
-        Args:
-            key: Cache key
-            func: Async function to call if the value is not found
-            
-        Returns:
-            Cached value
-        """
-        # Get the value
-        value = self.get(key)
-        
-        # If the value is not found, set it
-        if value is None:
-            value = await func()
-            self.set(key, value)
-            
-        return value
-        
-async_cache = AsyncCache()
 
-def cached_async(ttl: float = 300.0):
+def cached_async(ttl: float = 60.0):
     """
-    Decorator for caching async function results.
+    Decorator to cache the result of an async function.
     
     Args:
-        ttl: Time to live in seconds
+        ttl: The time-to-live in seconds
         
     Returns:
-        Decorated function
+        The decorated function
     """
-    def decorator(func: AsyncCallable):
-        # Create a cache for this function
-        cache = AsyncCache(ttl=ttl)
-        
+    cache = AsyncCache(ttl)
+    
+    def decorator(func: CoroFunc) -> CoroFunc:
         @functools.wraps(func)
         async def wrapper(*args, **kwargs):
-            # Create a key from the arguments
+            # Create a cache key
             key_parts = [func.__name__]
-            
-            # Add positional arguments
-            for arg in args:
-                key_parts.append(str(arg))
-                
-            # Add keyword arguments
-            for k, v in sorted(kwargs.items()):
-                key_parts.append(f"{k}={v}")
-                
-            # Join the parts
+            key_parts.extend(str(arg) for arg in args)
+            key_parts.extend(f"{k}={v}" for k, v in sorted(kwargs.items()))
             key = ":".join(key_parts)
             
-            # Get or set the value
             return await cache.get_or_set_async(key, lambda: func(*args, **kwargs))
             
         return wrapper

@@ -1,522 +1,704 @@
 """
 Bot Integration Module
 
-This module provides a central integration point for all compatibility layers,
-creating a unified interface for the Tower of Temptation Discord bot.
+This module integrates all compatibility layers together for the Discord bot,
+providing seamless operation across different Discord library versions.
 """
 
-import asyncio
-import logging
 import os
-from typing import Any, Dict, List, Optional, Union
+import sys
+import logging
+import traceback
+from typing import Any, Dict, List, Optional, Tuple, Union, Callable, TypeVar, cast, Generic
 
-# Setup logging
+# Configure logging
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler("bot.log"),
+        logging.StreamHandler()
+    ]
 )
 logger = logging.getLogger(__name__)
 
-try:
-    # Import Discord compatibility layers
-    from utils.discord_compat import discord, commands, app_commands
-    from utils.attribute_access import (
-        safe_server_getattr,
-        safe_member_getattr,
-        safe_channel_getattr,
-        safe_role_getattr,
-        safe_message_getattr
-    )
-    from utils.interaction_handlers import (
-        safely_respond_to_interaction,
-        hybrid_send,
-        is_interaction,
-        is_context,
-        get_user,
-        get_guild,
-        get_guild_id
-    )
-    from utils.command_handlers import (
-        EnhancedSlashCommand,
-        text_option,
-        number_option,
-        integer_option,
-        boolean_option,
-        user_option,
-        channel_option,
-        role_option,
-        enhanced_slash_command,
-        is_pycord_261_or_later
-    )
-    from utils.command_parameter_builder import (
-        CommandParameter,
-        CommandBuilder
-    )
-    
-    # Import MongoDB compatibility layers
-    from utils.safe_mongodb import (
-        SafeMongoDBResult,
-        SafeDocument,
-        get_collection,
-        safe_find_one,
-        safe_find,
-        safe_insert_one,
-        safe_update_one,
-        safe_delete_one,
-        safe_count
-    )
-    from utils.mongo_compat import (
-        serialize_document,
-        deserialize_document,
-        is_objectid,
-        to_object_id,
-        handle_datetime
-    )
-    
-    # Import async and type safety helpers
-    from utils.async_helpers import (
-        is_coroutine_function,
-        ensure_async,
-        ensure_sync,
-        safe_gather,
-        safe_wait,
-        AsyncCache,
-        cached_async
-    )
-    from utils.type_safety import (
-        safe_cast,
-        safe_str,
-        safe_int,
-        safe_float,
-        safe_bool,
-        safe_list,
-        safe_dict,
-        safe_function_call,
-        validate_type,
-        validate_func_args
-    )
-    
-    # Import event and intent helpers
-    from utils.event_helpers import (
-        EventDispatcher,
-        CompatibleBot,
-        register_cog_events
-    )
-    from utils.intent_helpers import (
-        get_default_intents,
-        get_all_intents,
-        get_minimal_intents,
-        create_intents,
-        merge_intents
-    )
-    from utils.permission_helpers import (
-        get_channel_permissions,
-        has_permission,
-        has_channel_permission,
-        format_permissions,
-        create_permissions,
-        merge_permissions,
-        is_admin,
-        has_role,
-        has_any_role,
-        has_all_roles
-    )
-    
-    # Import MongoDB client libraries
-    import motor.motor_asyncio
-    import pymongo
-    
-    # Flag that imports succeeded
-    IMPORTS_SUCCEEDED = True
-    
-except ImportError as e:
-    logger.error(f"Failed to import required modules: {e}")
-    IMPORTS_SUCCEEDED = False
+# Global instances
+_mongodb_client = None
+_mongodb_db = None
+_discord_bot = None
 
+# Type variables
+T = TypeVar('T')
+R = TypeVar('R')
 
-class CompatibleMongoClient:
-    """MongoDB client with compatibility layers."""
-    
-    def __init__(self, uri: Optional[str] = None):
-        """
-        Initialize the MongoDB client.
-        
-        Args:
-            uri: MongoDB connection URI, or None to use environment variable
-        """
-        if uri is None:
-            uri = os.environ.get("MONGODB_URI")
-            
-        if not uri:
-            raise ValueError("MongoDB URI is required")
-            
-        # Create the client
-        self.motor_client = motor.motor_asyncio.AsyncIOMotorClient(uri)
-        
-    def get_database(self, db_name: str) -> motor.motor_asyncio.AsyncIOMotorDatabase:
-        """
-        Get a MongoDB database.
-        
-        Args:
-            db_name: Database name
-            
-        Returns:
-            AsyncIOMotorDatabase instance
-        """
-        return self.motor_client[db_name]
-        
-    def get_collection(self, db_name: str, collection_name: str) -> motor.motor_asyncio.AsyncIOMotorCollection:
-        """
-        Get a MongoDB collection with compatibility.
-        
-        Args:
-            db_name: Database name
-            collection_name: Collection name
-            
-        Returns:
-            AsyncIOMotorCollection instance
-        """
-        db = self.get_database(db_name)
-        return get_collection(db, collection_name)
-        
-    async def find_one(self, db_name: str, collection_name: str, query: Dict[str, Any], **kwargs) -> Optional[SafeDocument]:
-        """
-        Find a single document with compatibility.
-        
-        Args:
-            db_name: Database name
-            collection_name: Collection name
-            query: Query document
-            **kwargs: Additional arguments to pass to find_one
-            
-        Returns:
-            SafeDocument instance or None
-        """
-        collection = self.get_collection(db_name, collection_name)
-        result = await safe_find_one(collection, query, **kwargs)
-        
-        if result:
-            return SafeDocument(result)
-            
-        return None
-        
-    async def find(self, db_name: str, collection_name: str, query: Dict[str, Any], **kwargs) -> List[SafeDocument]:
-        """
-        Find documents with compatibility.
-        
-        Args:
-            db_name: Database name
-            collection_name: Collection name
-            query: Query document
-            **kwargs: Additional arguments to pass to find
-            
-        Returns:
-            List of SafeDocument instances
-        """
-        collection = self.get_collection(db_name, collection_name)
-        cursor = await safe_find(collection, query, **kwargs)
-        
-        results = []
-        async for doc in cursor:
-            results.append(SafeDocument(doc))
-            
-        return results
-        
-    async def insert_one(self, db_name: str, collection_name: str, document: Dict[str, Any], **kwargs) -> SafeMongoDBResult:
-        """
-        Insert a single document with compatibility.
-        
-        Args:
-            db_name: Database name
-            collection_name: Collection name
-            document: Document to insert
-            **kwargs: Additional arguments to pass to insert_one
-            
-        Returns:
-            SafeMongoDBResult instance
-        """
-        collection = self.get_collection(db_name, collection_name)
-        return await safe_insert_one(collection, document, **kwargs)
-        
-    async def update_one(self, db_name: str, collection_name: str, query: Dict[str, Any], update: Dict[str, Any], **kwargs) -> SafeMongoDBResult:
-        """
-        Update a single document with compatibility.
-        
-        Args:
-            db_name: Database name
-            collection_name: Collection name
-            query: Query document
-            update: Update document
-            **kwargs: Additional arguments to pass to update_one
-            
-        Returns:
-            SafeMongoDBResult instance
-        """
-        collection = self.get_collection(db_name, collection_name)
-        return await safe_update_one(collection, query, update, **kwargs)
-        
-    async def delete_one(self, db_name: str, collection_name: str, query: Dict[str, Any], **kwargs) -> SafeMongoDBResult:
-        """
-        Delete a single document with compatibility.
-        
-        Args:
-            db_name: Database name
-            collection_name: Collection name
-            query: Query document
-            **kwargs: Additional arguments to pass to delete_one
-            
-        Returns:
-            SafeMongoDBResult instance
-        """
-        collection = self.get_collection(db_name, collection_name)
-        return await safe_delete_one(collection, query, **kwargs)
-        
-    async def count(self, db_name: str, collection_name: str, query: Dict[str, Any], **kwargs) -> int:
-        """
-        Count documents with compatibility.
-        
-        Args:
-            db_name: Database name
-            collection_name: Collection name
-            query: Query document
-            **kwargs: Additional arguments to pass to count_documents
-            
-        Returns:
-            Document count
-        """
-        collection = self.get_collection(db_name, collection_name)
-        return await safe_count(collection, query, **kwargs)
-
-
-class DiscordBot(CompatibleBot):
+def setup_mongodb(
+    connection_string: Optional[str] = None, 
+    database_name: Optional[str] = None,
+    **kwargs) -> bool:
     """
-    Discord bot with compatibility layers.
-    
-    This class extends CompatibleBot to provide a unified interface for
-    the Tower of Temptation Discord bot, incorporating all compatibility
-    layers.
-    """
-    
-    def __init__(
-        self,
-        command_prefix: str = "!",
-        intents: Optional[discord.Intents] = None,
-        mongodb_uri: Optional[str] = None,
-        db_name: str = "tower_of_temptation",
-        **kwargs
-    ):
-        """
-        Initialize the bot with compatibility layers.
-        
-        Args:
-            command_prefix: Command prefix for text commands
-            intents: Discord intents, or None for default intents
-            mongodb_uri: MongoDB URI, or None to use environment variable
-            db_name: MongoDB database name
-            **kwargs: Additional arguments to pass to CompatibleBot
-        """
-        # Set up default intents if not provided
-        if intents is None:
-            intents = get_default_intents()
-            
-        # Initialize the bot
-        super().__init__(command_prefix=command_prefix, intents=intents, **kwargs)
-        
-        # Set up MongoDB client
-        self.db_client = CompatibleMongoClient(mongodb_uri)
-        self.db_name = db_name
-        
-        # Set up AsyncCache
-        self.cache = AsyncCache(ttl=300.0)  # 5 minutes TTL
-        
-        # Register event handlers
-        self.setup_events()
-        
-    def setup_events(self):
-        """Set up event handlers."""
-        
-        @self.event
-        async def on_ready():
-            """Event handler for when the bot is ready."""
-            logger.info(f"Logged in as {self.user.name} ({self.user.id})")
-            logger.info(f"Using Discord API version {discord.__version__}")
-            logger.info(f"Using PyMongo version {pymongo.__version__}")
-            logger.info(f"Using Motor version {motor.__version__}")
-            
-        @self.event
-        async def on_command_error(ctx, error):
-            """Event handler for command errors."""
-            # Get the original error
-            error = getattr(error, "original", error)
-            
-            # Log the error
-            logger.error(f"Command error: {error}")
-            logger.error("".join(traceback.format_exception(type(error), error, error.__traceback__)))
-            
-            # Send an error message
-            await hybrid_send(
-                ctx,
-                content=f"An error occurred: {safe_str(error)}",
-                ephemeral=True
-            )
-            
-    def add_cog(self, cog, **kwargs):
-        """
-        Add a cog with compatibility.
-        
-        Args:
-            cog: Cog to add
-            **kwargs: Additional arguments to pass to add_cog
-        """
-        # Add the cog
-        super().add_cog(cog, **kwargs)
-        
-        # Register cog events
-        register_cog_events(self, cog)
-        
-    async def get_document(self, collection_name: str, query: Dict[str, Any], **kwargs) -> Optional[SafeDocument]:
-        """
-        Get a document from the database.
-        
-        Args:
-            collection_name: Collection name
-            query: Query document
-            **kwargs: Additional arguments to pass to find_one
-            
-        Returns:
-            SafeDocument instance or None
-        """
-        return await self.db_client.find_one(self.db_name, collection_name, query, **kwargs)
-        
-    async def get_documents(self, collection_name: str, query: Dict[str, Any], **kwargs) -> List[SafeDocument]:
-        """
-        Get documents from the database.
-        
-        Args:
-            collection_name: Collection name
-            query: Query document
-            **kwargs: Additional arguments to pass to find
-            
-        Returns:
-            List of SafeDocument instances
-        """
-        return await self.db_client.find(self.db_name, collection_name, query, **kwargs)
-        
-    async def save_document(self, collection_name: str, document: Dict[str, Any], **kwargs) -> SafeMongoDBResult:
-        """
-        Save a document to the database.
-        
-        Args:
-            collection_name: Collection name
-            document: Document to save
-            **kwargs: Additional arguments to pass to insert_one
-            
-        Returns:
-            SafeMongoDBResult instance
-        """
-        return await self.db_client.insert_one(self.db_name, collection_name, document, **kwargs)
-        
-    async def update_document(self, collection_name: str, query: Dict[str, Any], update: Dict[str, Any], **kwargs) -> SafeMongoDBResult:
-        """
-        Update a document in the database.
-        
-        Args:
-            collection_name: Collection name
-            query: Query document
-            update: Update document
-            **kwargs: Additional arguments to pass to update_one
-            
-        Returns:
-            SafeMongoDBResult instance
-        """
-        return await self.db_client.update_one(self.db_name, collection_name, query, update, **kwargs)
-        
-    async def delete_document(self, collection_name: str, query: Dict[str, Any], **kwargs) -> SafeMongoDBResult:
-        """
-        Delete a document from the database.
-        
-        Args:
-            collection_name: Collection name
-            query: Query document
-            **kwargs: Additional arguments to pass to delete_one
-            
-        Returns:
-            SafeMongoDBResult instance
-        """
-        return await self.db_client.delete_one(self.db_name, collection_name, query, **kwargs)
-        
-    async def count_documents(self, collection_name: str, query: Dict[str, Any], **kwargs) -> int:
-        """
-        Count documents in the database.
-        
-        Args:
-            collection_name: Collection name
-            query: Query document
-            **kwargs: Additional arguments to pass to count_documents
-            
-        Returns:
-            Document count
-        """
-        return await self.db_client.count(self.db_name, collection_name, query, **kwargs)
-        
-    async def cached_get_document(self, collection_name: str, query: Dict[str, Any], **kwargs) -> Optional[SafeDocument]:
-        """
-        Get a document from the database with caching.
-        
-        Args:
-            collection_name: Collection name
-            query: Query document
-            **kwargs: Additional arguments to pass to find_one
-            
-        Returns:
-            SafeDocument instance or None
-        """
-        # Create a cache key
-        cache_key = f"doc:{collection_name}:{serialize_document(query)}"
-        
-        # Get from cache or fetch
-        return await self.cache.get_or_set_async(
-            cache_key,
-            lambda: self.get_document(collection_name, query, **kwargs)
-        )
-
-
-def create_bot(**kwargs) -> DiscordBot:
-    """
-    Create a Discord bot with all compatibility layers.
+    Set up MongoDB with appropriate compatibility layers.
     
     Args:
-        **kwargs: Arguments to pass to DiscordBot
+        connection_string: The MongoDB connection string
+        database_name: The name of the database to use
+        **kwargs: Additional arguments to pass to the MongoDB client
         
     Returns:
-        DiscordBot instance
+        Whether the setup was successful
     """
-    return DiscordBot(**kwargs)
-
-
-# Example usage
-if __name__ == "__main__":
-    # Check if imports succeeded
-    if not IMPORTS_SUCCEEDED:
-        print("Failed to import required modules. Please run verify_compatibility.py first.")
-        import sys
-        sys.exit(1)
-        
-    # Load environment variables from .env file if present
-    try:
-        from dotenv import load_dotenv
-        load_dotenv()
-    except ImportError:
-        print("python-dotenv not installed. Environment variables must be set manually.")
-        
-    # Create the bot
-    bot = create_bot()
+    global _mongodb_client, _mongodb_db
     
-    # Run the bot
-    token = os.environ.get("DISCORD_TOKEN")
-    if not token:
-        print("DISCORD_TOKEN environment variable is required")
-        import sys
-        sys.exit(1)
+    if not connection_string:
+        connection_string = os.environ.get('MONGODB_URI')
         
-    bot.run(token)
+    if not database_name:
+        database_name = os.environ.get('MONGODB_DATABASE', 'toweroftemptation')
+        
+    if not connection_string:
+        logger.error("MongoDB connection string is required")
+        return False
+        
+    try:
+        # Import the compatibility layer
+        try:
+            from utils.safe_mongodb import setup_mongodb as safe_setup_mongodb
+            result = safe_setup_mongodb(connection_string, database_name, **kwargs)
+            if not result:
+                logger.error("Failed to set up MongoDB using safe_mongodb")
+                return False
+                
+            from utils.safe_mongodb import get_client, get_database
+            _mongodb_client = get_client()
+            _mongodb_db = get_database()
+            
+            logger.info(f"MongoDB set up successfully with database: {database_name}")
+            return True
+        except ImportError:
+            # Fall back to direct MongoDB imports
+            try:
+                import motor.motor_asyncio
+                _mongodb_client = motor.motor_asyncio.AsyncIOMotorClient(connection_string, **kwargs)
+                _mongodb_db = _mongodb_client[database_name]
+                
+                logger.info(f"MongoDB set up successfully with direct imports, database: {database_name}")
+                return True
+            except Exception as mongo_error:
+                logger.error(f"Failed to set up MongoDB with direct imports: {mongo_error}")
+                return False
+    except Exception as e:
+        logger.error(f"Failed to set up MongoDB: {e}")
+        return False
+
+def get_collection(collection_name: str) -> Any:
+    """
+    Get a MongoDB collection with compatibility layer.
+    
+    Args:
+        collection_name: The name of the collection
+        
+    Returns:
+        The collection or None
+    """
+    global _mongodb_db
+    
+    if not _mongodb_db:
+        logger.error("MongoDB not set up. Call setup_mongodb first.")
+        return None
+        
+    try:
+        # Try using the safe MongoDB layer
+        try:
+            from utils.safe_mongodb import get_collection as safe_get_collection
+            return safe_get_collection(collection_name)
+        except ImportError:
+            # Fall back to direct access
+            return _mongodb_db[collection_name]
+    except Exception as e:
+        logger.error(f"Failed to get collection {collection_name}: {e}")
+        return None
+
+def create_document_model(collection_name: str, **attrs) -> type:
+    """
+    Create a document model class with the compatibility layer.
+    
+    Args:
+        collection_name: The name of the collection
+        **attrs: Additional attributes for the model class
+        
+    Returns:
+        The model class
+    """
+    try:
+        # Try using the compatibility layer
+        try:
+            from utils.mongo_compat import create_document_model as compat_create_model
+            return compat_create_model(collection_name, **attrs)
+        except ImportError:
+            # Create a simple model class as fallback
+            class DocumentModel:
+                def __init__(self, **data):
+                    self.collection_name = collection_name
+                    for key, value in data.items():
+                        setattr(self, key, value)
+                        
+                async def save(self):
+                    doc_data = {k: v for k, v in self.__dict__.items() if not k.startswith('_')}
+                    collection = get_collection(collection_name)
+                    if '_id' in doc_data:
+                        await collection.update_one({'_id': doc_data['_id']}, {'$set': doc_data})
+                    else:
+                        result = await collection.insert_one(doc_data)
+                        self._id = result.inserted_id
+                        
+                @classmethod
+                async def find_one(cls, filter_dict):
+                    collection = get_collection(collection_name)
+                    doc = await collection.find_one(filter_dict)
+                    if doc:
+                        return cls(**doc)
+                    return None
+                    
+            # Add any additional attributes
+            for key, value in attrs.items():
+                setattr(DocumentModel, key, value)
+                
+            return DocumentModel
+    except Exception as e:
+        logger.error(f"Failed to create document model for {collection_name}: {e}")
+        return None
+
+async def find_one_document(collection_name: str, filter: Dict, 
+                           projection: Optional[Dict] = None, **kwargs) -> Any:
+    """
+    Find a single document with compatibility layer.
+    
+    Args:
+        collection_name: The name of the collection
+        filter: The filter to apply
+        projection: The projection to apply
+        **kwargs: Additional arguments to pass to find_one
+        
+    Returns:
+        The found document or None
+    """
+    try:
+        # Try using the safe MongoDB layer
+        try:
+            from utils.safe_mongodb import find_one_document as safe_find_one
+            result = await safe_find_one(collection_name, filter, projection, **kwargs)
+            return result
+        except ImportError:
+            # Fall back to direct access
+            collection = get_collection(collection_name)
+            if not collection:
+                return None
+                
+            return await collection.find_one(filter, projection, **kwargs)
+    except Exception as e:
+        logger.error(f"Failed to find document in {collection_name}: {e}")
+        return None
+
+async def find_documents(collection_name: str, filter: Dict, 
+                        projection: Optional[Dict] = None, **kwargs) -> List[Any]:
+    """
+    Find documents with compatibility layer.
+    
+    Args:
+        collection_name: The name of the collection
+        filter: The filter to apply
+        projection: The projection to apply
+        **kwargs: Additional arguments to pass to find
+        
+    Returns:
+        The found documents or empty list
+    """
+    try:
+        # Try using the safe MongoDB layer
+        try:
+            from utils.safe_mongodb import find_documents as safe_find
+            result = await safe_find(collection_name, filter, projection, **kwargs)
+            return result
+        except ImportError:
+            # Fall back to direct access
+            collection = get_collection(collection_name)
+            if not collection:
+                return []
+                
+            cursor = collection.find(filter, projection, **kwargs)
+            return await cursor.to_list(length=None)
+    except Exception as e:
+        logger.error(f"Failed to find documents in {collection_name}: {e}")
+        return []
+
+async def insert_document(collection_name: str, document: Dict, **kwargs) -> Any:
+    """
+    Insert a document with compatibility layer.
+    
+    Args:
+        collection_name: The name of the collection
+        document: The document to insert
+        **kwargs: Additional arguments to pass to insert_one
+        
+    Returns:
+        The inserted document ID or None
+    """
+    try:
+        # Try using the safe MongoDB layer
+        try:
+            from utils.safe_mongodb import insert_document as safe_insert
+            result = await safe_insert(collection_name, document, **kwargs)
+            return result
+        except ImportError:
+            # Fall back to direct access
+            collection = get_collection(collection_name)
+            if not collection:
+                return None
+                
+            # Serialize document if needed
+            try:
+                from utils.mongo_compat import serialize_document
+                document = serialize_document(document)
+            except ImportError:
+                pass
+                
+            result = await collection.insert_one(document, **kwargs)
+            return result.inserted_id
+    except Exception as e:
+        logger.error(f"Failed to insert document in {collection_name}: {e}")
+        return None
+
+async def update_document(collection_name: str, filter: Dict, 
+                         update: Dict, **kwargs) -> bool:
+    """
+    Update a document with compatibility layer.
+    
+    Args:
+        collection_name: The name of the collection
+        filter: The filter to apply
+        update: The update to apply
+        **kwargs: Additional arguments to pass to update_one
+        
+    Returns:
+        Whether the update was successful
+    """
+    try:
+        # Try using the safe MongoDB layer
+        try:
+            from utils.safe_mongodb import update_document as safe_update
+            result = await safe_update(collection_name, filter, update, **kwargs)
+            return result
+        except ImportError:
+            # Fall back to direct access
+            collection = get_collection(collection_name)
+            if not collection:
+                return False
+                
+            # Ensure update has operators
+            if not any(key.startswith('$') for key in update):
+                update = {'$set': update}
+                
+            # Serialize document if needed
+            try:
+                from utils.mongo_compat import serialize_document
+                filter = serialize_document(filter)
+                update = serialize_document(update)
+            except ImportError:
+                pass
+                
+            result = await collection.update_one(filter, update, **kwargs)
+            return result.modified_count > 0
+    except Exception as e:
+        logger.error(f"Failed to update document in {collection_name}: {e}")
+        return False
+
+async def delete_document(collection_name: str, filter: Dict, **kwargs) -> bool:
+    """
+    Delete a document with compatibility layer.
+    
+    Args:
+        collection_name: The name of the collection
+        filter: The filter to apply
+        **kwargs: Additional arguments to pass to delete_one
+        
+    Returns:
+        Whether the deletion was successful
+    """
+    try:
+        # Try using the safe MongoDB layer
+        try:
+            from utils.safe_mongodb import delete_document as safe_delete
+            result = await safe_delete(collection_name, filter, **kwargs)
+            return result
+        except ImportError:
+            # Fall back to direct access
+            collection = get_collection(collection_name)
+            if not collection:
+                return False
+                
+            # Serialize document if needed
+            try:
+                from utils.mongo_compat import serialize_document
+                filter = serialize_document(filter)
+            except ImportError:
+                pass
+                
+            result = await collection.delete_one(filter, **kwargs)
+            return result.deleted_count > 0
+    except Exception as e:
+        logger.error(f"Failed to delete document in {collection_name}: {e}")
+        return False
+
+async def count_documents(collection_name: str, filter: Optional[Dict] = None, **kwargs) -> int:
+    """
+    Count documents with compatibility layer.
+    
+    Args:
+        collection_name: The name of the collection
+        filter: The filter to apply
+        **kwargs: Additional arguments to pass to count_documents
+        
+    Returns:
+        The count
+    """
+    try:
+        # Try using the safe MongoDB layer
+        try:
+            from utils.safe_mongodb import count_documents as safe_count
+            result = await safe_count(collection_name, filter, **kwargs)
+            return result
+        except ImportError:
+            # Fall back to direct access
+            collection = get_collection(collection_name)
+            if not collection:
+                return 0
+                
+            filter = filter or {}
+            
+            # Serialize document if needed
+            try:
+                from utils.mongo_compat import serialize_document
+                filter = serialize_document(filter)
+            except ImportError:
+                pass
+                
+            return await collection.count_documents(filter, **kwargs)
+    except Exception as e:
+        logger.error(f"Failed to count documents in {collection_name}: {e}")
+        return 0
+
+def setup_discord(token: Optional[str] = None, intents: Optional[Any] = None, **kwargs) -> bool:
+    """
+    Set up Discord with appropriate compatibility layers.
+    
+    Args:
+        token: The Discord bot token
+        intents: The Discord intents to use
+        **kwargs: Additional arguments to pass to the Discord client
+        
+    Returns:
+        Whether the setup was successful
+    """
+    global _discord_bot
+    
+    if not token:
+        token = os.environ.get('DISCORD_TOKEN')
+        
+    if not token:
+        logger.error("Discord token is required")
+        return False
+        
+    try:
+        # Try importing Discord
+        try:
+            import discord
+            from discord.ext import commands
+            
+            # Get intents if not provided
+            if intents is None:
+                try:
+                    from utils.intent_helpers import get_default_intents
+                    intents = get_default_intents()
+                except ImportError:
+                    intents = discord.Intents.default()
+                    intents.message_content = True
+                    intents.members = True
+                    
+            # Create the bot
+            _discord_bot = commands.Bot(command_prefix='!', intents=intents, **kwargs)
+            
+            # Set the token for later use
+            _discord_bot.token = token
+            
+            @_discord_bot.event
+            async def on_ready():
+                logger.info(f'Bot is ready! Logged in as {_discord_bot.user}')
+                
+            return True
+        except ImportError as ie:
+            logger.error(f"Failed to import Discord: {ie}")
+            return False
+    except Exception as e:
+        logger.error(f"Failed to set up Discord: {e}")
+        traceback.print_exc()
+        return False
+
+def get_bot_info() -> Dict[str, Any]:
+    """
+    Get information about the bot and its dependencies.
+    
+    Returns:
+        A dictionary of information
+    """
+    info = {
+        'bot_ready': _discord_bot is not None,
+        'mongodb_ready': _mongodb_client is not None,
+        'dependencies': {}
+    }
+    
+    # Check Discord version
+    try:
+        import discord
+        info['dependencies']['discord'] = discord.__version__
+    except (ImportError, AttributeError):
+        info['dependencies']['discord'] = 'Not installed'
+        
+    # Check PyMongo version
+    try:
+        import pymongo
+        info['dependencies']['pymongo'] = pymongo.__version__
+    except (ImportError, AttributeError):
+        info['dependencies']['pymongo'] = 'Not installed'
+        
+    # Check Motor version
+    try:
+        import motor
+        info['dependencies']['motor'] = motor.__version__
+    except (ImportError, AttributeError):
+        info['dependencies']['motor'] = 'Not installed'
+        
+    return info
+
+async def send_message(ctx_or_interaction: Any, content: Optional[str] = None, 
+                      **kwargs) -> Any:
+    """
+    Send a message with compatibility layer.
+    
+    Args:
+        ctx_or_interaction: The context or interaction to send to
+        content: The content to send
+        **kwargs: Additional arguments to pass to the send method
+        
+    Returns:
+        The message sent or None
+    """
+    try:
+        # Try to determine if it's a context or interaction
+        if hasattr(ctx_or_interaction, 'send'):
+            # It's a context
+            return await ctx_or_interaction.send(content, **kwargs)
+        elif hasattr(ctx_or_interaction, 'response') and hasattr(ctx_or_interaction.response, 'send_message'):
+            # It's an interaction
+            return await ctx_or_interaction.response.send_message(content, **kwargs)
+        elif hasattr(ctx_or_interaction, 'followup') and hasattr(ctx_or_interaction.followup, 'send'):
+            # It's an interaction that has already responded
+            return await ctx_or_interaction.followup.send(content, **kwargs)
+        else:
+            logger.error(f"Unknown context or interaction type: {type(ctx_or_interaction)}")
+            return None
+    except Exception as e:
+        logger.error(f"Failed to send message: {e}")
+        traceback.print_exc()
+        return None
+
+def register_command(name: str, callback: Callable, **kwargs) -> Any:
+    """
+    Register a command with compatibility layer.
+    
+    Args:
+        name: The name of the command
+        callback: The callback function
+        **kwargs: Additional arguments to pass to the command decorator
+        
+    Returns:
+        The command object
+    """
+    global _discord_bot
+    
+    if not _discord_bot:
+        logger.error("Discord bot not set up. Call setup_discord first.")
+        return None
+        
+    try:
+        # Get the command decorator
+        command = _discord_bot.command(**kwargs)
+        
+        # Apply the decorator to the callback
+        decorated_callback = command(callback)
+        
+        # Set the name if it's different
+        if decorated_callback.name != name:
+            decorated_callback.name = name
+            
+        return decorated_callback
+    except Exception as e:
+        logger.error(f"Failed to register command {name}: {e}")
+        return None
+
+def register_cog(cog_class: type) -> bool:
+    """
+    Register a cog with compatibility layer.
+    
+    Args:
+        cog_class: The cog class to register
+        
+    Returns:
+        Whether the registration was successful
+    """
+    global _discord_bot
+    
+    if not _discord_bot:
+        logger.error("Discord bot not set up. Call setup_discord first.")
+        return False
+        
+    try:
+        # Create an instance of the cog
+        cog_instance = cog_class(_discord_bot)
+        
+        # Add the cog to the bot
+        _discord_bot.add_cog(cog_instance)
+        logger.info(f"Registered cog: {cog_class.__name__}")
+        return True
+    except Exception as e:
+        logger.error(f"Failed to register cog {cog_class.__name__}: {e}")
+        return False
+
+def create_bot(**kwargs) -> Any:
+    """
+    Create a Discord bot with compatibility layer.
+    
+    Args:
+        **kwargs: Additional arguments to pass to the Bot constructor
+        
+    Returns:
+        The bot object
+    """
+    try:
+        import discord
+        from discord.ext import commands
+        
+        # Get intents if not provided
+        if 'intents' not in kwargs:
+            try:
+                from utils.intent_helpers import get_default_intents
+                kwargs['intents'] = get_default_intents()
+            except ImportError:
+                kwargs['intents'] = discord.Intents.default()
+                kwargs['intents'].message_content = True
+                kwargs['intents'].members = True
+                
+        # Set default command prefix if not provided
+        if 'command_prefix' not in kwargs:
+            kwargs['command_prefix'] = '!'
+            
+        # Create the bot
+        bot = commands.Bot(**kwargs)
+        
+        # Create a wrapper for commands with better error handling
+        def command_wrapper(name=None, cls=None, **cmd_kwargs):
+            def decorator(func):
+                # Create the command
+                command = bot.command(name=name, cls=cls, **cmd_kwargs)
+                
+                # Apply the decorator
+                decorated = command(func)
+                
+                # Add error handling
+                async def command_error_handler(ctx, error):
+                    logger.error(f"Error in command {ctx.command}: {error}")
+                    await ctx.send(f"Error: {error}")
+                    
+                # Set the error handler for the command
+                decorated.error(command_error_handler)
+                
+                return decorated
+            return decorator
+            
+        # Add the wrapper to the bot
+        bot.better_command = command_wrapper
+        
+        return bot
+    except Exception as e:
+        logger.error(f"Failed to create bot: {e}")
+        return None
+
+async def run_bot(**kwargs) -> None:
+    """
+    Run the Discord bot.
+    
+    Args:
+        **kwargs: Additional arguments to pass to the bot.run method
+    """
+    global _discord_bot
+    
+    if not _discord_bot:
+        logger.error("Discord bot not set up. Call setup_discord first.")
+        return
+        
+    token = getattr(_discord_bot, 'token', os.environ.get('DISCORD_TOKEN'))
+    
+    if not token:
+        logger.error("Discord token is required")
+        return
+        
+    try:
+        await _discord_bot.start(token, **kwargs)
+    except KeyboardInterrupt:
+        logger.info("Bot stopped by keyboard interrupt")
+        await _discord_bot.close()
+    except Exception as e:
+        logger.error(f"Error running bot: {e}")
+        await _discord_bot.close()
+
+def serialize_document(document: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Serialize a document with compatibility layer.
+    
+    Args:
+        document: The document to serialize
+        
+    Returns:
+        The serialized document
+    """
+    try:
+        from utils.mongo_compat import serialize_document as compat_serialize
+        return compat_serialize(document)
+    except ImportError:
+        # Basic serialization as fallback
+        result = {}
+        for key, value in document.items():
+            if hasattr(value, '__dict__'):
+                result[key] = value.__dict__
+            elif isinstance(value, dict):
+                result[key] = serialize_document(value)
+            elif isinstance(value, list):
+                result[key] = [serialize_document(item) if isinstance(item, dict) else item for item in value]
+            else:
+                result[key] = value
+        return result
+        
+def deserialize_document(document: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Deserialize a document with compatibility layer.
+    
+    Args:
+        document: The document to deserialize
+        
+    Returns:
+        The deserialized document
+    """
+    try:
+        from utils.mongo_compat import deserialize_document as compat_deserialize
+        return compat_deserialize(document)
+    except ImportError:
+        # No special deserialization needed for the fallback
+        return document

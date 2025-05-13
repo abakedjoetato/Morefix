@@ -1,62 +1,116 @@
 """
-Discord Bot Runner
+Discord Bot Launcher
 
-This script starts the Discord bot with proper environment setup and error handling.
+This script launches the Tower of Temptation Discord bot with all compatibility layers.
 """
+
 import os
-import sys
 import logging
-import traceback
-from datetime import datetime
-from dotenv import load_dotenv
+import asyncio
+from typing import Dict, Any, Optional
 
 # Configure logging
 logging.basicConfig(
-    level=logging.DEBUG,
+    level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.StreamHandler(),
-        logging.FileHandler('bot.log')
+        logging.FileHandler("bot.log"),
+        logging.StreamHandler()
     ]
 )
 logger = logging.getLogger(__name__)
 
-def main():
-    """Main entry point for starting the Discord bot"""
+# Import compatibility integration
+from bot_integration import (
+    setup_mongodb,
+    setup_discord,
+    register_command,
+    register_cog,
+    run_bot,
+    get_bot_info
+)
+
+async def setup_and_run():
+    """Set up the bot and run it."""
+    # Check for required environment variables
+    mongodb_uri = os.environ.get('MONGODB_URI')
+    discord_token = os.environ.get('DISCORD_TOKEN')
+    
+    if not mongodb_uri:
+        logger.error("MONGODB_URI environment variable is required.")
+        return False
+        
+    if not discord_token:
+        logger.error("DISCORD_TOKEN environment variable is required.")
+        return False
+        
+    # Set up MongoDB
+    mongodb_success = setup_mongodb(
+        connection_string=mongodb_uri,
+        database_name=os.environ.get('MONGODB_DATABASE', 'toweroftemptation')
+    )
+    
+    if not mongodb_success:
+        logger.error("Failed to set up MongoDB. Check your connection string.")
+        return False
+        
+    # Set up Discord
+    discord_success = setup_discord(
+        token=discord_token,
+        intents=None  # Will use default intents from intent_helpers
+    )
+    
+    if not discord_success:
+        logger.error("Failed to set up Discord. Check your token.")
+        return False
+        
+    # Import and register cogs
     try:
-        # Load environment variables
-        load_dotenv()
+        # Import dynamically to avoid circular imports
+        import importlib
+        import pathlib
         
-        # Set log level from environment
-        log_level = os.environ.get('LOG_LEVEL', 'INFO')
-        numeric_level = getattr(logging, log_level.upper(), None)
-        if isinstance(numeric_level, int):
-            logging.getLogger().setLevel(numeric_level)
-        
-        logger.info(f"Starting Discord bot at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-        logger.info(f"Log level set to: {log_level}")
-        
-        # Check for dev mode
-        dev_mode = os.environ.get('DISCORD_DEV_MODE', 'false').lower() == 'true'
-        if dev_mode:
-            logger.info("Running in DEVELOPMENT mode - Discord API connectivity disabled")
-        
-        # Check for SFTP mode
-        sftp_enabled = os.environ.get('SFTP_ENABLED', 'false').lower() == 'true'
-        logger.info(f"SFTP functionality is {'enabled' if sftp_enabled else 'disabled'}")
-        
-        # Run the bot by importing main module
-        import main
-        # The main module handles the actual bot startup
-        
-    except ImportError as e:
-        logger.critical(f"Failed to import required modules: {e}")
-        logger.critical(traceback.format_exc())
-        sys.exit(1)
+        cogs_path = pathlib.Path('cogs')
+        if cogs_path.exists() and cogs_path.is_dir():
+            for cog_file in cogs_path.glob('*.py'):
+                # Skip __init__.py and other special files
+                if cog_file.name.startswith('__'):
+                    continue
+                    
+                cog_name = cog_file.stem
+                try:
+                    # Import the cog module
+                    cog_module = importlib.import_module(f'cogs.{cog_name}')
+                    
+                    # Look for classes that might be cogs (end with 'Cog')
+                    for attr_name in dir(cog_module):
+                        if attr_name.endswith('Cog'):
+                            cog_class = getattr(cog_module, attr_name)
+                            if isinstance(cog_class, type):
+                                # Register the cog
+                                register_cog(cog_class)
+                                logger.info(f"Registered cog: {attr_name}")
+                except Exception as e:
+                    logger.error(f"Error loading cog {cog_name}: {e}")
     except Exception as e:
-        logger.critical(f"Failed to start Discord bot: {e}")
-        logger.critical(traceback.format_exc())
-        sys.exit(1)
+        logger.error(f"Error loading cogs: {e}")
+        
+    # Log bot info
+    bot_info = get_bot_info()
+    logger.info(f"Bot info: {bot_info}")
+    
+    # Run the bot
+    await run_bot()
+    return True
+
+def main():
+    """Main entry point."""
+    try:
+        asyncio.run(setup_and_run())
+    except KeyboardInterrupt:
+        logger.info("Bot shutdown by user")
+    except Exception as e:
+        logger.error(f"Error running bot: {e}", exc_info=True)
 
 if __name__ == "__main__":
     main()
