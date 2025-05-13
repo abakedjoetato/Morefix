@@ -1,13 +1,15 @@
 """
 Discord Bot Launcher
 
-This script launches the Tower of Temptation Discord bot with all compatibility layers.
+This module provides a launcher for the Discord bot with proper integration
+and compatibility across different Discord library versions.
 """
 
 import os
+import sys
 import logging
 import asyncio
-from typing import Dict, Any, Optional
+from typing import Optional
 
 # Configure logging
 logging.basicConfig(
@@ -20,97 +22,55 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Import compatibility integration
-from bot_integration import (
-    setup_mongodb,
-    setup_discord,
-    register_command,
-    register_cog,
-    run_bot,
-    get_bot_info
-)
+# Import bot integration
+try:
+    from bot_integration import create_bot, setup_bot
+except ImportError as e:
+    logger.error(f"Failed to import bot integration: {e}")
+    logger.error("Please ensure bot_integration.py exists and all dependencies are installed.")
+    sys.exit(1)
 
-async def setup_and_run():
-    """Set up the bot and run it."""
-    # Check for required environment variables
-    mongodb_uri = os.environ.get('MONGODB_URI')
-    discord_token = os.environ.get('DISCORD_TOKEN')
+async def main(token: Optional[str] = None) -> None:
+    """
+    Main function to start the bot.
     
-    if not mongodb_uri:
-        logger.error("MONGODB_URI environment variable is required.")
-        return False
-        
-    if not discord_token:
-        logger.error("DISCORD_TOKEN environment variable is required.")
-        return False
-        
-    # Set up MongoDB
-    mongodb_success = setup_mongodb(
-        connection_string=mongodb_uri,
-        database_name=os.environ.get('MONGODB_DATABASE', 'toweroftemptation')
-    )
+    Args:
+        token: Discord bot token (overrides environment variable)
+    """
+    # Get token from arguments or environment
+    token = token or os.environ.get('DISCORD_TOKEN')
     
-    if not mongodb_success:
-        logger.error("Failed to set up MongoDB. Check your connection string.")
-        return False
-        
-    # Set up Discord
-    discord_success = setup_discord(
-        token=discord_token,
-        intents=None  # Will use default intents from intent_helpers
-    )
+    if not token:
+        logger.error("No Discord token provided. Please set the DISCORD_TOKEN environment variable.")
+        sys.exit(1)
     
-    if not discord_success:
-        logger.error("Failed to set up Discord. Check your token.")
-        return False
-        
-    # Import and register cogs
+    # Create and set up the bot
     try:
-        # Import dynamically to avoid circular imports
-        import importlib
-        import pathlib
-        
-        cogs_path = pathlib.Path('cogs')
-        if cogs_path.exists() and cogs_path.is_dir():
-            for cog_file in cogs_path.glob('*.py'):
-                # Skip __init__.py and other special files
-                if cog_file.name.startswith('__'):
-                    continue
-                    
-                cog_name = cog_file.stem
-                try:
-                    # Import the cog module
-                    cog_module = importlib.import_module(f'cogs.{cog_name}')
-                    
-                    # Look for classes that might be cogs (end with 'Cog')
-                    for attr_name in dir(cog_module):
-                        if attr_name.endswith('Cog'):
-                            cog_class = getattr(cog_module, attr_name)
-                            if isinstance(cog_class, type):
-                                # Register the cog
-                                register_cog(cog_class)
-                                logger.info(f"Registered cog: {attr_name}")
-                except Exception as e:
-                    logger.error(f"Error loading cog {cog_name}: {e}")
+        bot = create_bot(token)
+        await setup_bot(bot)
     except Exception as e:
-        logger.error(f"Error loading cogs: {e}")
-        
-    # Log bot info
-    bot_info = get_bot_info()
-    logger.info(f"Bot info: {bot_info}")
+        logger.error(f"Error setting up bot: {e}")
+        sys.exit(1)
     
-    # Run the bot
-    await run_bot()
-    return True
-
-def main():
-    """Main entry point."""
+    # Start the bot
     try:
-        asyncio.run(setup_and_run())
+        await bot.start()
     except KeyboardInterrupt:
-        logger.info("Bot shutdown by user")
+        logger.info("Bot stopped by user")
     except Exception as e:
-        logger.error(f"Error running bot: {e}", exc_info=True)
+        logger.error(f"Error running bot: {e}")
+    finally:
+        # Ensure the bot is closed properly
+        try:
+            await bot.close()
+        except Exception as e:
+            logger.error(f"Error closing bot: {e}")
 
 if __name__ == "__main__":
-    main()
+    # Get token from command line if provided
+    token = None
+    if len(sys.argv) > 1:
+        token = sys.argv[1]
+    
+    # Run the bot
+    asyncio.run(main(token))

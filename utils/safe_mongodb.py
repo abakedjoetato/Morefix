@@ -1,426 +1,626 @@
 """
-Safe MongoDB Operations
+Safe MongoDB Module
 
-This module provides safe MongoDB operations with proper error handling
-and type safety. It's designed to work with both pymongo and motor
-with identical interfaces.
+This module provides safe operations for MongoDB with proper error handling
+and compatibility between different MongoDB/Motor versions.
 """
 
 import logging
-import traceback
-from typing import Any, Dict, List, Optional, Tuple, Union, TypeVar, cast, Generic, Type
+import sys
+import types
+import asyncio
+import inspect
+from typing import Any, Dict, List, Optional, Tuple, Union, TypeVar, Generic, cast
+from dataclasses import dataclass, field
 
-# Type hints
-from pymongo.collection import Collection
-from pymongo.cursor import Cursor
-from pymongo.results import (
-    InsertOneResult,
-    UpdateResult,
-    DeleteResult
-)
-
-# Setup logging
+# Configure logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
 
+# Global variables
+_mongodb_client = None
+_mongodb_db = None
+
+# Type variables
 T = TypeVar('T')
+R = TypeVar('R')
 
-# Global database connection
-_database = None
+# Try to import motor and pymongo
+try:
+    import motor
+    import motor.motor_asyncio
+    import pymongo
+    from pymongo.results import InsertOneResult, UpdateResult, DeleteResult
+    from pymongo.cursor import Cursor
+    from bson import ObjectId
+    HAS_MOTOR = True
+except ImportError:
+    HAS_MOTOR = False
+    logger.error("Failed to import Motor or PyMongo. MongoDB functionality will not be available.")
+    # Create mock modules if motor is not available
+    motor = types.ModuleType('motor')
+    motor.motor_asyncio = types.ModuleType('motor.motor_asyncio')
+    pymongo = types.ModuleType('pymongo')
+    pymongo.results = types.ModuleType('pymongo.results')
+    pymongo.cursor = types.ModuleType('pymongo.cursor')
+    
+    # Create essential mock classes
+    class MockObjectId:
+        def __init__(self, id_str=None):
+            self.id = id_str or "000000000000000000000000"
+            
+        def __str__(self):
+            return self.id
+            
+        def __repr__(self):
+            return f"ObjectId('{self.id}')"
+            
+    class MockResult:
+        def __init__(self, acknowledged=True, **kwargs):
+            self.acknowledged = acknowledged
+            for key, value in kwargs.items():
+                setattr(self, key, value)
+                
+    # Add mock classes to modules
+    setattr(pymongo.results, 'InsertOneResult', MockResult)
+    setattr(pymongo.results, 'UpdateResult', MockResult)
+    setattr(pymongo.results, 'DeleteResult', MockResult)
+    
+    # Create ObjectId class
+    ObjectId = MockObjectId
 
-def set_database(db):
-    """Set the global database connection."""
-    global _database
-    _database = db
-
-def get_database():
-    """Get the global database connection."""
-    return _database
+# Import MongoDB compatibility utilities if available
+try:
+    from utils.mongo_compat import serialize_document, deserialize_document
+    HAS_COMPAT = True
+except ImportError:
+    HAS_COMPAT = False
+    
+    # Create simple serialization functions as fallback
+    def serialize_document(document: Dict[str, Any]) -> Dict[str, Any]:
+        """Simple document serialization fallback."""
+        return document
+        
+    def deserialize_document(document: Dict[str, Any]) -> Dict[str, Any]:
+        """Simple document deserialization fallback."""
+        return document
 
 class SafeMongoDBResult(Generic[T]):
     """
-    A result wrapper for MongoDB operations that includes error handling.
+    A safe wrapper for MongoDB operation results with proper error handling.
+    
+    This class provides a consistent interface for accessing MongoDB operation
+    results across different versions and operation types.
     
     Attributes:
         success: Whether the operation was successful
-        data: The data returned by the operation, if successful
-        error: The error that occurred, if any
-        status_code: A status code for the operation (e.g., 200 for success)
+        error: The error that occurred during the operation (if any)
+        result: The raw operation result
+        value: The value of the operation (e.g., inserted_id, modified_count)
     """
     
-    def __init__(self, success: bool = True, data: Optional[T] = None, 
-                 error: Optional[Exception] = None, status_code: int = 200,
-                 raw_result: Optional[Any] = None):
+    def __init__(self, 
+                result: Optional[Any] = None, 
+                error: Optional[Exception] = None,
+                value: Optional[Any] = None):
         """
-        Initialize the result.
+        Initialize a SafeMongoDBResult.
         
         Args:
-            success: Whether the operation was successful
-            data: The data returned by the operation
-            error: The error that occurred
-            status_code: A status code for the operation
-            raw_result: The raw result from the MongoDB operation
+            result: The raw operation result
+            error: The error that occurred during the operation
+            value: The value of the operation
         """
-        self.success = success
-        self.data = data
+        self.success = error is None
         self.error = error
-        self.status_code = status_code
-        self.raw_result = raw_result
+        self.result = result
+        self._value = value
+        
+        # Determine result type and extract appropriate value if not provided
+        if self.success and result is not None and value is None:
+            if hasattr(result, 'inserted_id'):
+                self._value = result.inserted_id
+            elif hasattr(result, 'modified_count'):
+                self._value = result.modified_count
+            elif hasattr(result, 'deleted_count'):
+                self._value = result.deleted_count
+            elif hasattr(result, 'upserted_id'):
+                self._value = result.upserted_id
+            elif isinstance(result, list):
+                self._value = result
+            elif isinstance(result, dict):
+                self._value = result
+            else:
+                self._value = result
+    
+    @property
+    def value(self) -> Any:
+        """Get the value of the operation."""
+        return self._value
         
     @property
-    def is_success(self) -> bool:
-        """Whether the operation was successful."""
-        return self.success and self.error is None
-        
-    @property
-    def acknowledged(self) -> bool:
-        """Whether the operation was acknowledged by the server."""
-        if not self.raw_result:
-            return False
-        return getattr(self.raw_result, 'acknowledged', False)
-        
-    @property
-    def inserted_id(self) -> Optional[Any]:
-        """The ID of the inserted document."""
-        if not self.raw_result:
-            return None
-        return getattr(self.raw_result, 'inserted_id', None)
-        
-    @property
-    def matched_count(self) -> int:
-        """The number of documents matched by the query."""
-        if not self.raw_result:
-            return 0
-        return getattr(self.raw_result, 'matched_count', 0)
+    def inserted_id(self) -> Any:
+        """Get the inserted document ID (for insert operations)."""
+        if hasattr(self.result, 'inserted_id'):
+            return self.result.inserted_id
+        return None
         
     @property
     def modified_count(self) -> int:
-        """The number of documents modified by the operation."""
-        if not self.raw_result:
-            return 0
-        return getattr(self.raw_result, 'modified_count', 0)
+        """Get the number of modified documents (for update operations)."""
+        if hasattr(self.result, 'modified_count'):
+            return self.result.modified_count
+        return 0
         
     @property
     def deleted_count(self) -> int:
-        """The number of documents deleted by the operation."""
-        if not self.raw_result:
-            return 0
-        return getattr(self.raw_result, 'deleted_count', 0)
+        """Get the number of deleted documents (for delete operations)."""
+        if hasattr(self.result, 'deleted_count'):
+            return self.result.deleted_count
+        return 0
         
     @property
-    def upserted_id(self) -> Optional[Any]:
-        """The ID of the upserted document."""
-        if not self.raw_result:
-            return None
-        return getattr(self.raw_result, 'upserted_id', None)
+    def upserted_id(self) -> Any:
+        """Get the upserted document ID (for update operations with upsert)."""
+        if hasattr(self.result, 'upserted_id'):
+            return self.result.upserted_id
+        return None
         
-    @classmethod
-    def success_result(cls, data: Optional[T] = None, raw_result: Optional[Any] = None) -> 'SafeMongoDBResult[T]':
-        """Create a success result."""
-        return cls(success=True, data=data, raw_result=raw_result)
-        
-    @classmethod
-    def error_result(cls, error: Optional[Exception] = None, 
-                     status_code: int = 500) -> 'SafeMongoDBResult[T]':
-        """Create an error result."""
-        return cls(success=False, error=error, status_code=status_code)
+    @property
+    def acknowledged(self) -> bool:
+        """Get whether the operation was acknowledged by the server."""
+        if hasattr(self.result, 'acknowledged'):
+            return self.result.acknowledged
+        return self.success
         
     def __bool__(self) -> bool:
-        """Convert to boolean."""
+        """Convert to boolean (True if successful)."""
         return self.success
+        
+    def __len__(self) -> int:
+        """Get the length of the result (for list results)."""
+        if isinstance(self._value, list):
+            return len(self._value)
+        elif hasattr(self._value, '__len__'):
+            return len(self._value)
+        return 0
+        
+    def __getitem__(self, key: Any) -> Any:
+        """Get an item from the result value."""
+        if isinstance(self._value, (list, dict)):
+            return self._value[key]
+        elif hasattr(self._value, '__getitem__'):
+            return self._value[key]
+        raise TypeError(f"Result value of type {type(self._value)} does not support indexing")
+        
+    def __iter__(self):
+        """Iterate over the result value."""
+        if isinstance(self._value, (list, dict)):
+            return iter(self._value)
+        elif hasattr(self._value, '__iter__'):
+            return iter(self._value)
+        raise TypeError(f"Result value of type {type(self._value)} is not iterable")
+    
+    def __str__(self) -> str:
+        """Convert to string."""
+        if self.success:
+            return f"Success: {self._value}"
+        return f"Error: {self.error}"
+        
+    def __repr__(self) -> str:
+        """Convert to representation string."""
+        if self.success:
+            return f"SafeMongoDBResult(success=True, value={self._value!r})"
+        return f"SafeMongoDBResult(success=False, error={self.error!r})"
+    
+    # Make SafeMongoDBResult awaitable by implementing __await__
+    def __await__(self):
+        """Make SafeMongoDBResult awaitable."""
+        # Just return a completed future with self
+        future = asyncio.get_event_loop().create_future()
+        future.set_result(self)
+        return future.__await__()
 
+@dataclass
 class SafeDocument:
     """
-    A base class for MongoDB documents with helper methods.
+    A safe wrapper for MongoDB documents with attribute-style access.
     
-    This class provides helper methods for working with MongoDB documents,
-    including serialization, deserialization, and CRUD operations.
+    This class provides a consistent interface for accessing MongoDB document
+    fields as attributes, with proper error handling and fallback values.
+    
+    Attributes:
+        data: The raw document data
     """
     
-    collection_name = None
+    data: Dict[str, Any] = field(default_factory=dict)
     
-    @classmethod
-    def get_collection(cls) -> Collection:
-        """Get the collection for this document type."""
-        if _database is None:
-            raise RuntimeError("Database not initialized. Call set_database first.")
+    def __getattr__(self, name: str) -> Any:
+        """Get an attribute from the document."""
+        if name in self.data:
+            return self.data[name]
+        return None
+        
+    def __setattr__(self, name: str, value: Any) -> None:
+        """Set an attribute in the document."""
+        if name == 'data':
+            super().__setattr__(name, value)
+        else:
+            self.data[name] = value
             
-        if cls.collection_name is None:
-            raise NotImplementedError("Collection name not specified.")
-            
-        return _database[cls.collection_name]
+    def __getitem__(self, key: str) -> Any:
+        """Get an item from the document."""
+        return self.data.get(key)
         
-    @classmethod
-    async def get_by_id(cls, id, **kwargs) -> SafeMongoDBResult:
-        """Get a document by ID."""
-        return await safe_find_one(cls.get_collection(), {'_id': id}, **kwargs)
+    def __setitem__(self, key: str, value: Any) -> None:
+        """Set an item in the document."""
+        self.data[key] = value
         
-    @classmethod
-    async def find_one(cls, filter, **kwargs) -> SafeMongoDBResult:
-        """Find a single document."""
-        return await safe_find_one(cls.get_collection(), filter, **kwargs)
+    def __contains__(self, key: str) -> bool:
+        """Check if the document contains a key."""
+        return key in self.data
+    
+    def get(self, key: str, default: Any = None) -> Any:
+        """Get a value from the document with a default."""
+        return self.data.get(key, default)
         
-    @classmethod
-    async def find(cls, filter, **kwargs) -> SafeMongoDBResult:
-        """Find documents."""
-        return await safe_find(cls.get_collection(), filter, **kwargs)
+    def keys(self) -> List[str]:
+        """Get the keys in the document."""
+        return list(self.data.keys())
         
-    @classmethod
-    async def count(cls, filter=None, **kwargs) -> SafeMongoDBResult:
-        """Count documents."""
-        return await safe_count(cls.get_collection(), filter, **kwargs)
+    def values(self) -> List[Any]:
+        """Get the values in the document."""
+        return list(self.data.values())
         
-    @classmethod
-    async def get_all(cls, **kwargs) -> SafeMongoDBResult:
-        """Get all documents."""
-        return await safe_find(cls.get_collection(), {}, **kwargs)
+    def items(self) -> List[Tuple[str, Any]]:
+        """Get the items in the document."""
+        return list(self.data.items())
         
-    @classmethod
-    async def insert_one(cls, document, **kwargs) -> SafeMongoDBResult:
-        """Insert a document."""
-        return await safe_insert_one(cls.get_collection(), document, **kwargs)
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to a dictionary."""
+        return self.data
         
-    @classmethod
-    async def update_one(cls, filter, update, **kwargs) -> SafeMongoDBResult:
-        """Update a document."""
-        return await safe_update_one(cls.get_collection(), filter, update, **kwargs)
+    def __str__(self) -> str:
+        """Convert to string."""
+        return str(self.data)
         
-    @classmethod
-    async def delete_one(cls, filter, **kwargs) -> SafeMongoDBResult:
-        """Delete a document."""
-        return await safe_delete_one(cls.get_collection(), filter, **kwargs)
-        
-    def __getattr__(self, name):
-        """Get an attribute dynamically."""
-        # This allows accessing document fields as attributes
-        if name in self.__dict__:
-            return self.__dict__[name]
-        raise AttributeError(f"{self.__class__.__name__} has no attribute {name}")
+    def __repr__(self) -> str:
+        """Convert to representation string."""
+        return f"SafeDocument({self.data!r})"
 
-def get_collection(collection_name: str) -> Collection:
+# Setup functions
+def setup_mongodb(connection_string: str, database_name: str, **kwargs) -> bool:
     """
-    Get a MongoDB collection by name.
+    Set up MongoDB client and database.
     
     Args:
-        collection_name: The name of the collection
+        connection_string: MongoDB connection string
+        database_name: Database name
+        **kwargs: Additional arguments for the MongoDB client
         
     Returns:
-        The collection
-        
-    Raises:
-        RuntimeError: If the database is not initialized
+        Whether the setup was successful
     """
-    if _database is None:
-        raise RuntimeError("Database not initialized. Call set_database first.")
+    global _mongodb_client, _mongodb_db
+    
+    if not HAS_MOTOR:
+        logger.error("Motor is not available. MongoDB functionality will not be available.")
+        return False
         
-    return _database[collection_name]
+    try:
+        _mongodb_client = motor.motor_asyncio.AsyncIOMotorClient(connection_string, **kwargs)
+        _mongodb_db = _mongodb_client[database_name]
+        return True
+    except Exception as e:
+        logger.error(f"Failed to set up MongoDB: {e}")
+        return False
 
-async def safe_find_one(collection: Collection, filter: Dict, 
-                        projection: Optional[Dict] = None, 
+def get_client() -> Any:
+    """
+    Get the MongoDB client.
+    
+    Returns:
+        The MongoDB client or None if not set up
+    """
+    global _mongodb_client
+    return _mongodb_client
+
+def get_database() -> Any:
+    """
+    Get the MongoDB database.
+    
+    Returns:
+        The MongoDB database or None if not set up
+    """
+    global _mongodb_db
+    return _mongodb_db
+
+def get_collection(collection_name: str) -> Any:
+    """
+    Get a MongoDB collection.
+    
+    Args:
+        collection_name: Name of the collection
+        
+    Returns:
+        The MongoDB collection or None if not set up
+    """
+    global _mongodb_db
+    
+    if _mongodb_db is None:
+        logger.error("MongoDB database not set up. Call setup_mongodb first.")
+        return None
+        
+    try:
+        return _mongodb_db[collection_name]
+    except Exception as e:
+        logger.error(f"Failed to get collection {collection_name}: {e}")
+        return None
+
+# Safe MongoDB operations
+async def find_one_document(collection_name: str, 
+                           filter: Dict[str, Any],
+                           projection: Optional[Dict[str, Any]] = None,
+                           **kwargs) -> SafeMongoDBResult:
+    """
+    Find a single document in a collection safely.
+    
+    Args:
+        collection_name: Name of the collection
+        filter: Filter to apply
+        projection: Projection to apply
+        **kwargs: Additional arguments for find_one
+        
+    Returns:
+        SafeMongoDBResult with the found document or error
+    """
+    collection = get_collection(collection_name)
+    if collection is None:
+        return SafeMongoDBResult(error=ValueError(f"Collection {collection_name} not found"))
+        
+    try:
+        # Serialize filter if compatibility module is available
+        if HAS_COMPAT:
+            filter = serialize_document(filter)
+            if projection:
+                projection = serialize_document(projection)
+                
+        # Find the document
+        document = await collection.find_one(filter, projection, **kwargs)
+        
+        # Deserialize document if compatibility module is available
+        if document and HAS_COMPAT:
+            document = deserialize_document(document)
+            
+        return SafeMongoDBResult(result=document, value=document)
+    except Exception as e:
+        logger.error(f"Error finding document in {collection_name}: {e}")
+        return SafeMongoDBResult(error=e)
+
+async def find_documents(collection_name: str,
+                        filter: Dict[str, Any],
+                        projection: Optional[Dict[str, Any]] = None,
                         **kwargs) -> SafeMongoDBResult:
     """
-    Safely find a single document in a collection.
+    Find documents in a collection safely.
     
     Args:
-        collection: The collection to search
-        filter: The filter to apply
-        projection: The projection to apply
-        **kwargs: Additional arguments to pass to find_one
+        collection_name: Name of the collection
+        filter: Filter to apply
+        projection: Projection to apply
+        **kwargs: Additional arguments for find
         
     Returns:
-        A SafeMongoDBResult with the found document
+        SafeMongoDBResult with the found documents or error
     """
+    collection = get_collection(collection_name)
+    if collection is None:
+        return SafeMongoDBResult(error=ValueError(f"Collection {collection_name} not found"))
+        
     try:
-        # Check if collection's find_one is async or not
-        find_one_method = collection.find_one
-        if hasattr(find_one_method, '__await__'):
-            # Async Motor version
+        # Serialize filter if compatibility module is available
+        if HAS_COMPAT:
+            filter = serialize_document(filter)
             if projection:
-                result = await find_one_method(filter, projection, **kwargs)
-            else:
-                result = await find_one_method(filter, **kwargs)
-        else:
-            # Sync PyMongo version
-            if projection:
-                result = find_one_method(filter, projection, **kwargs)
-            else:
-                result = find_one_method(filter, **kwargs)
+                projection = serialize_document(projection)
                 
-        return SafeMongoDBResult.success_result(data=result)
+        # Find the documents
+        cursor = collection.find(filter, projection, **kwargs)
+        
+        # Try to get documents with different to_list methods
+        try:
+            # Try the new to_list method with length parameter
+            documents = await cursor.to_list(length=None)
+        except (TypeError, AttributeError):
+            try:
+                # Try the old to_list method
+                documents = await cursor.to_list()
+            except Exception:
+                # Fallback to manual iteration
+                documents = []
+                async for doc in cursor:
+                    documents.append(doc)
+                    
+        # Deserialize documents if compatibility module is available
+        if HAS_COMPAT:
+            documents = [deserialize_document(doc) for doc in documents]
+            
+        return SafeMongoDBResult(result=documents, value=documents)
     except Exception as e:
-        logger.error(f"Error finding document: {e}")
-        logger.debug(traceback.format_exc())
-        return SafeMongoDBResult.error_result(error=e)
+        logger.error(f"Error finding documents in {collection_name}: {e}")
+        return SafeMongoDBResult(error=e)
 
-async def safe_find(collection: Collection, filter: Dict, 
-                    projection: Optional[Dict] = None, 
-                    **kwargs) -> SafeMongoDBResult:
+async def insert_document(collection_name: str,
+                         document: Dict[str, Any],
+                         **kwargs) -> SafeMongoDBResult:
     """
-    Safely find documents in a collection.
+    Insert a document into a collection safely.
     
     Args:
-        collection: The collection to search
-        filter: The filter to apply
-        projection: The projection to apply
-        **kwargs: Additional arguments to pass to find
+        collection_name: Name of the collection
+        document: Document to insert
+        **kwargs: Additional arguments for insert_one
         
     Returns:
-        A SafeMongoDBResult with the found documents as a list
+        SafeMongoDBResult with the inserted ID or error
     """
-    try:
-        # Check if collection's find is async or not
-        find_method = collection.find
-        cursor = None
+    collection = get_collection(collection_name)
+    if collection is None:
+        return SafeMongoDBResult(error=ValueError(f"Collection {collection_name} not found"))
         
-        if projection:
-            cursor = find_method(filter, projection, **kwargs)
-        else:
-            cursor = find_method(filter, **kwargs)
+    try:
+        # Serialize document if compatibility module is available
+        if HAS_COMPAT:
+            document = serialize_document(document)
             
-        # Check if cursor is async or not
-        if hasattr(cursor, 'to_list') and hasattr(cursor.to_list, '__await__'):
-            # Async Motor version
-            result = await cursor.to_list(length=None)
-        else:
-            # Sync PyMongo version
-            result = list(cursor)
-            
-        return SafeMongoDBResult.success_result(data=result)
+        # Insert the document
+        result = await collection.insert_one(document, **kwargs)
+        return SafeMongoDBResult(result=result)
     except Exception as e:
-        logger.error(f"Error finding documents: {e}")
-        logger.debug(traceback.format_exc())
-        return SafeMongoDBResult.error_result(error=e)
+        logger.error(f"Error inserting document into {collection_name}: {e}")
+        return SafeMongoDBResult(error=e)
 
-async def safe_insert_one(collection: Collection, document: Dict, 
-                           **kwargs) -> SafeMongoDBResult:
+async def update_document(collection_name: str,
+                         filter: Dict[str, Any],
+                         update: Dict[str, Any],
+                         **kwargs) -> SafeMongoDBResult:
     """
-    Safely insert a document into a collection.
+    Update a document in a collection safely.
     
     Args:
-        collection: The collection to insert into
-        document: The document to insert
-        **kwargs: Additional arguments to pass to insert_one
+        collection_name: Name of the collection
+        filter: Filter to apply
+        update: Update to apply
+        **kwargs: Additional arguments for update_one
         
     Returns:
-        A SafeMongoDBResult with the insertion result
+        SafeMongoDBResult with the update result or error
     """
+    collection = get_collection(collection_name)
+    if collection is None:
+        return SafeMongoDBResult(error=ValueError(f"Collection {collection_name} not found"))
+        
     try:
-        # Check if collection's insert_one is async or not
-        insert_one_method = collection.insert_one
-        if hasattr(insert_one_method, '__await__'):
-            # Async Motor version
-            result = await insert_one_method(document, **kwargs)
-        else:
-            # Sync PyMongo version
-            result = insert_one_method(document, **kwargs)
+        # Serialize filter and update if compatibility module is available
+        if HAS_COMPAT:
+            filter = serialize_document(filter)
+            update = serialize_document(update)
             
-        return SafeMongoDBResult.success_result(data=result.inserted_id, raw_result=result)
+        # Ensure update has operators
+        if not any(key.startswith('$') for key in update):
+            update = {'$set': update}
+            
+        # Update the document
+        result = await collection.update_one(filter, update, **kwargs)
+        return SafeMongoDBResult(result=result)
     except Exception as e:
-        logger.error(f"Error inserting document: {e}")
-        logger.debug(traceback.format_exc())
-        return SafeMongoDBResult.error_result(error=e)
+        logger.error(f"Error updating document in {collection_name}: {e}")
+        return SafeMongoDBResult(error=e)
 
-async def safe_update_one(collection: Collection, filter: Dict, update: Dict, 
-                           **kwargs) -> SafeMongoDBResult:
+async def delete_document(collection_name: str,
+                         filter: Dict[str, Any],
+                         **kwargs) -> SafeMongoDBResult:
     """
-    Safely update a document in a collection.
+    Delete a document from a collection safely.
     
     Args:
-        collection: The collection to update
-        filter: The filter to apply
-        update: The update to apply
-        **kwargs: Additional arguments to pass to update_one
+        collection_name: Name of the collection
+        filter: Filter to apply
+        **kwargs: Additional arguments for delete_one
         
     Returns:
-        A SafeMongoDBResult with the update result
+        SafeMongoDBResult with the delete result or error
     """
+    collection = get_collection(collection_name)
+    if collection is None:
+        return SafeMongoDBResult(error=ValueError(f"Collection {collection_name} not found"))
+        
     try:
-        # Check if collection's update_one is async or not
-        update_one_method = collection.update_one
-        if hasattr(update_one_method, '__await__'):
-            # Async Motor version
-            result = await update_one_method(filter, update, **kwargs)
-        else:
-            # Sync PyMongo version
-            result = update_one_method(filter, update, **kwargs)
+        # Serialize filter if compatibility module is available
+        if HAS_COMPAT:
+            filter = serialize_document(filter)
             
-        return SafeMongoDBResult.success_result(
-            data={
-                'matched_count': result.matched_count,
-                'modified_count': result.modified_count,
-                'upserted_id': result.upserted_id
-            }, 
-            raw_result=result
-        )
+        # Delete the document
+        result = await collection.delete_one(filter, **kwargs)
+        return SafeMongoDBResult(result=result)
     except Exception as e:
-        logger.error(f"Error updating document: {e}")
-        logger.debug(traceback.format_exc())
-        return SafeMongoDBResult.error_result(error=e)
+        logger.error(f"Error deleting document from {collection_name}: {e}")
+        return SafeMongoDBResult(error=e)
 
-async def safe_delete_one(collection: Collection, filter: Dict, 
-                           **kwargs) -> SafeMongoDBResult:
+async def count_documents(collection_name: str,
+                         filter: Optional[Dict[str, Any]] = None,
+                         **kwargs) -> SafeMongoDBResult:
     """
-    Safely delete a document from a collection.
+    Count documents in a collection safely.
     
     Args:
-        collection: The collection to delete from
-        filter: The filter to apply
-        **kwargs: Additional arguments to pass to delete_one
+        collection_name: Name of the collection
+        filter: Filter to apply
+        **kwargs: Additional arguments for count_documents
         
     Returns:
-        A SafeMongoDBResult with the deletion result
+        SafeMongoDBResult with the count or error
     """
+    collection = get_collection(collection_name)
+    if collection is None:
+        return SafeMongoDBResult(error=ValueError(f"Collection {collection_name} not found"))
+        
     try:
-        # Check if collection's delete_one is async or not
-        delete_one_method = collection.delete_one
-        if hasattr(delete_one_method, '__await__'):
-            # Async Motor version
-            result = await delete_one_method(filter, **kwargs)
-        else:
-            # Sync PyMongo version
-            result = delete_one_method(filter, **kwargs)
+        # Serialize filter if compatibility module is available
+        filter = filter or {}
+        if HAS_COMPAT:
+            filter = serialize_document(filter)
             
-        return SafeMongoDBResult.success_result(
-            data={'deleted_count': result.deleted_count}, 
-            raw_result=result
-        )
+        # Count the documents
+        count = await collection.count_documents(filter, **kwargs)
+        return SafeMongoDBResult(result=count, value=count)
     except Exception as e:
-        logger.error(f"Error deleting document: {e}")
-        logger.debug(traceback.format_exc())
-        return SafeMongoDBResult.error_result(error=e)
+        logger.error(f"Error counting documents in {collection_name}: {e}")
+        return SafeMongoDBResult(error=e)
 
-async def safe_count(collection: Collection, filter: Optional[Dict] = None, 
-                      **kwargs) -> SafeMongoDBResult:
+# Helper function to create a success result
+def success_result(value: Optional[Any] = None,
+                  result: Optional[Any] = None) -> SafeMongoDBResult:
     """
-    Safely count documents in a collection.
+    Create a successful SafeMongoDBResult.
     
     Args:
-        collection: The collection to count
-        filter: The filter to apply
-        **kwargs: Additional arguments to pass to count_documents
+        value: The value of the operation
+        result: The raw operation result
         
     Returns:
-        A SafeMongoDBResult with the count
+        SafeMongoDBResult with success
     """
-    try:
-        # Handle None filter
-        if filter is None:
-            filter = {}
-            
-        # Check if collection's count_documents is async or not
-        count_method = collection.count_documents
-        if hasattr(count_method, '__await__'):
-            # Async Motor version
-            result = await count_method(filter, **kwargs)
-        else:
-            # Sync PyMongo version
-            result = count_method(filter, **kwargs)
-            
-        return SafeMongoDBResult.success_result(data=result)
-    except Exception as e:
-        logger.error(f"Error counting documents: {e}")
-        logger.debug(traceback.format_exc())
-        return SafeMongoDBResult.error_result(error=e)
+    return SafeMongoDBResult(result=result, value=value)
+
+# Helper function to create an error result
+def error_result(error: Optional[Exception] = None,
+                message: Optional[str] = None) -> SafeMongoDBResult:
+    """
+    Create an error SafeMongoDBResult.
+    
+    Args:
+        error: The error that occurred during the operation
+        message: Error message if error is not provided
+        
+    Returns:
+        SafeMongoDBResult with error
+    """
+    if error is None and message is not None:
+        error = Exception(message)
+    elif error is None:
+        error = Exception("Unknown error")
+        
+    return SafeMongoDBResult(error=error)
+
+# Export for easy importing
+__all__ = [
+    'setup_mongodb', 'get_client', 'get_database', 'get_collection',
+    'find_one_document', 'find_documents', 'insert_document',
+    'update_document', 'delete_document', 'count_documents',
+    'SafeMongoDBResult', 'SafeDocument',
+    'success_result', 'error_result'
+]
