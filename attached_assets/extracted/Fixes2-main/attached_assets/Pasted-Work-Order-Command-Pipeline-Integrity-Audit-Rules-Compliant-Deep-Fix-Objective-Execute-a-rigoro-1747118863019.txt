@@ -1,0 +1,85 @@
+Work Order: Command Pipeline Integrity Audit — Rules-Compliant Deep Fix
+
+Objective:
+Execute a rigorous, rules.md-compliant, full-stack diagnostic and remediation sweep across all bot commands. This initiative aims to trace and resolve every failure point across command execution, database interaction (MongoDB), and internal logic—without relying on quick fixes or speculative patches.
+
+Scope of Work (Rules-Driven):
+
+1. Holistic Codebase Analysis (Per Rule #1 & #11):
+
+No code alteration may begin until the entire command architecture has been audited.
+
+A detailed execution trace must be documented for each command, from invocation through parser/middleware to final output.
+
+
+
+2. MongoDB Compatibility & Logic Validation (Rule #6):
+
+Identify and eliminate improper use of Python truthiness checks (if dict: or if value:) in database query contexts.
+
+Ensure all MongoDB queries are schema-consistent, boolean-safe, and compliant with BSON behavior.
+
+Review all data filters and update operations for silent fails or no-op patterns.
+
+
+
+3. Dict/State Safety (Rule #5):
+
+Audit and correct any unsafe dictionary access, missing key references, or improperly merged state dicts.
+
+Ensure atomic integrity for user session objects, premium state, and per-command flags.
+
+
+
+4. Strict Command Behavior Preservation (Rule #3):
+
+No enhancements, refactors, or behavior modifications are permitted—commands must retain their exact functional output.
+
+Where fixes are applied, they must reproduce the original command logic identically, only with errors eliminated.
+
+
+
+5. Stack and Dependency Integrity (Rule #2 & #7):
+
+All logic must remain within the core bot architecture—no external web server logic, no SQL layers.
+
+Ensure Pycord, Python, and all core libraries are on latest stable versions; no deprecated APIs or polyfills.
+
+
+
+6. Multi-Guild & Multi-SFTP Safety (Rule #8):
+
+No single-server logic may remain. Confirm all commands operate in a scalable, isolated, and thread-safe fashion across thousands of guilds and multiple SFTP contexts.
+
+
+
+7. Premium System Gating Enforcement (Rule #9):
+
+All premium checks must remain strictly guild-scoped.
+
+Any accidental user-based premium assumptions must be refactored immediately.
+
+
+
+8. Fix Discipline (Rule #6 & #10):
+
+No fix scripts, hotpatches, monkey patches, or temporary workarounds.
+
+All fixes must be clean, atomic, complete, and cover all known edge cases.
+
+Each commit must represent a stable, system-wide correction—piecemeal logic is explicitly forbidden.
+
+
+
+9. Plan First, Fix Second (Rule #11):
+
+A detailed fix plan must be written and approved before any implementation begins.
+
+This plan is considered a production milestone and must be followed exactly.
+
+
+
+
+Mandatory Conformance to rules.md:
+All work must fully comply with the Claude Opus Engineering Bible. These rules are not guidelines—they are binding constraints. Any violation (intentional or accidental) will invalidate the remediation and require a rollback.
+

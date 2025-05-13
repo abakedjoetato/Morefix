@@ -1,0 +1,4 @@
+modules = ["python-3.11"]
+[nix]
+channel = "stable-24_05"
+packages = ["cacert", "cargo", "freetype", "lcms2", "libiconv", "libimagequant", "libjpeg", "libsodium", "libtiff", "libwebp", "libxcrypt", "nettle", "openjpeg", "openssh", "openssl", "pkg-config", "rustc", "tcl", "tk", "unzip", "zlib"]
