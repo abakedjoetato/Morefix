@@ -50,7 +50,8 @@ class FactionsCog(commands.Cog):
         # Standardize guild_id to string
         guild_id_str = str(guild_id)
         
-        logger.info(f"Factions command group accessed by {ctx.author.name}")
+        # Fixed: Removed undefined ctx reference
+        logger.info(f"Factions premium verification for guild {guild_id_str}, feature {feature_name}")
         
         try:
             # Import premium utils

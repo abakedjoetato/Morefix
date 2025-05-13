@@ -1,169 +1,97 @@
 """
-Command Imports for py-cord 2.6.1 Compatibility
+Command Imports Compatibility Detection
 
-This module provides compatibility layers for importing command-related classes and functions
-across different versions of py-cord and discord.py.
+This module provides utilities for detecting the Discord library version
+and adjusting import behavior accordingly.
 """
 
-import logging
-import sys
 import importlib
-from typing import Any, Dict, List, Optional, Union, Type, Tuple, cast
+import sys
+import logging
+from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
 
-# Constants for library detection
-IS_PYCORD = False
-PYCORD_VERSION = None
-PYCORD_261 = False
-HAS_APP_COMMANDS = False
+# Discord library version detection
+_DISCORD_VERSION: Optional[str] = None
+_IS_COMPATIBLE_WITH_PYCORD_261: Optional[bool] = None
 
-# Command-related classes that will be imported dynamically
-SlashCommand = None
-Option = None
-
-def _setup_imports():
+def get_discord_version() -> str:
     """
-    Setup imports and constants for library detection.
-    This function is called at module load time to initialize the constants.
-    """
-    global IS_PYCORD, PYCORD_VERSION, PYCORD_261, HAS_APP_COMMANDS
-    global SlashCommand, Option
+    Get the installed Discord library version
     
-    try:
-        import discord
-        
-        # Get the version and determine if it's py-cord
-        version = getattr(discord, "__version__", "0.0.0")
-        logger.info(f"Detected discord library version: {version}")
-        
-        # Check if it's py-cord by looking for specific attributes/modules
+    Returns:
+        The version string of the installed Discord library
+    """
+    global _DISCORD_VERSION
+    
+    if _DISCORD_VERSION is None:
         try:
-            # py-cord has a 'discord.ui' module with Modal class
-            from discord.ui import Modal
-            IS_PYCORD = True
-            PYCORD_VERSION = version
-            logger.info(f"Detected py-cord version: {PYCORD_VERSION}")
-        except ImportError:
-            IS_PYCORD = False
-            logger.info("Not using py-cord")
-        
-        # Check for py-cord 2.6.1 which misreports itself as 2.5.2
-        if IS_PYCORD and version == "2.5.2":
-            # Additional check for py-cord 2.6.1
-            try:
-                # In py-cord 2.6.1, Modal has specific attributes
-                from discord.ui import Modal
-                if hasattr(Modal, "__discord_ui_view__"):
-                    PYCORD_261 = True
-                    logger.info("Detected py-cord 2.6.1 compatibility mode")
-            except (ImportError, AttributeError):
-                PYCORD_261 = False
-        
-        # Check for app_commands module (discord.py style)
-        try:
-            import discord.app_commands
-            HAS_APP_COMMANDS = True
-            logger.info("Detected app_commands module")
-        except ImportError:
-            HAS_APP_COMMANDS = False
-            logger.info("No app_commands module found")
-        
-        # Import appropriate command classes based on detected library
-        if IS_PYCORD:
-            if PYCORD_261:
-                # py-cord 2.6.1
-                from discord.commands import SlashCommand as PyCordSlashCommand
-                from discord.commands import Option as PyCordOption
-                
-                SlashCommand = PyCordSlashCommand
-                Option = PyCordOption
-                logger.info("Imported SlashCommand and Option from py-cord 2.6.1")
-            else:
-                # Regular py-cord
-                from discord.ext.commands import SlashCommand as PyCordSlashCommand
-                from discord.commands import Option as PyCordOption
-                
-                SlashCommand = PyCordSlashCommand
-                Option = PyCordOption
-                logger.info("Imported SlashCommand and Option from regular py-cord")
-        elif HAS_APP_COMMANDS:
-            # discord.py style
-            from discord.ext.commands import Command as DiscordPyCommand
-            
-            # discord.py doesn't have SlashCommand, so use Command as a placeholder
-            SlashCommand = DiscordPyCommand
-            
-            # discord.py uses app_commands.Command, create a placeholder Option
-            class DiscordPyOption:
-                pass
-                
-            Option = DiscordPyOption
-            logger.info("Using compatibility classes for discord.py")
-        else:
-            # Fallback for older versions
-            from discord.ext.commands import Command
-            
-            # Use base Command class as placeholders
-            SlashCommand = Command
-            Option = object
-            logger.info("Using fallback Command class for older discord.py")
-            
-    except ImportError as e:
-        logger.error(f"Error during import setup: {e}")
-        
-        # Set fallback values
-        IS_PYCORD = False
-        PYCORD_VERSION = None
-        PYCORD_261 = False
-        HAS_APP_COMMANDS = False
-        SlashCommand = None
-        Option = None
+            discord_module = importlib.import_module("discord")
+            _DISCORD_VERSION = getattr(discord_module, "__version__", "unknown")
+        except (ImportError, AttributeError) as e:
+            logger.warning(f"Failed to get Discord library version: {e}")
+            _DISCORD_VERSION = "unknown"
+    
+    return _DISCORD_VERSION
 
 def is_compatible_with_pycord_261() -> bool:
     """
-    Check if we're running with py-cord 2.6.1 compatibility
+    Check if the installed Discord library is compatible with py-cord 2.6.1
     
     Returns:
-        bool: True if we're using py-cord 2.6.1, False otherwise
+        True if the library is compatible with py-cord 2.6.1, False otherwise
     """
-    return PYCORD_261
+    global _IS_COMPATIBLE_WITH_PYCORD_261
+    
+    if _IS_COMPATIBLE_WITH_PYCORD_261 is None:
+        version = get_discord_version()
+        
+        # Check for py-cord 2.6.1 specifically
+        is_pycord_261 = version == "2.6.1"
+        
+        # Check for module structure specific to py-cord
+        has_slash_command = False
+        try:
+            from discord.ext.commands import slash_command
+            has_slash_command = True
+        except ImportError:
+            pass
+        
+        # Set the compatibility flag based on version and structure
+        _IS_COMPATIBLE_WITH_PYCORD_261 = is_pycord_261 or has_slash_command
+        
+        # Log the detected version and compatibility
+        logger.info(f"Detected Discord library version: {version}")
+        logger.info(f"Compatible with py-cord 2.6.1: {_IS_COMPATIBLE_WITH_PYCORD_261}")
+    
+    return _IS_COMPATIBLE_WITH_PYCORD_261
 
-def has_app_commands() -> bool:
+def import_app_commands() -> Any:
     """
-    Check if we're running with discord.py app_commands
+    Import the appropriate app_commands module based on the installed Discord library
+    
+    This function handles the differences between discord.py and py-cord,
+    allowing code to use app_commands consistently.
     
     Returns:
-        bool: True if we have app_commands, False otherwise
+        The appropriate app_commands module
     """
-    return HAS_APP_COMMANDS
-
-def is_pycord() -> bool:
-    """
-    Check if we're running with py-cord
+    if is_compatible_with_pycord_261():
+        # For py-cord 2.6.1, we need to use our patches
+        try:
+            from utils import app_commands_patch
+            return app_commands_patch
+        except ImportError:
+            logger.warning("Failed to import app_commands_patch, falling back to discord.py style")
     
-    Returns:
-        bool: True if we're using py-cord, False otherwise
-    """
-    return IS_PYCORD
-
-def get_slash_command_class() -> Optional[Type]:
-    """
-    Get the appropriate SlashCommand class for the current library
-    
-    Returns:
-        Type or None: The SlashCommand class or None if not available
-    """
-    return SlashCommand
-
-def get_option_class() -> Optional[Type]:
-    """
-    Get the appropriate Option class for the current library
-    
-    Returns:
-        Type or None: The Option class or None if not available
-    """
-    return Option
-
-# Initialize the module when imported
-_setup_imports()
+    # For discord.py or fallback, use the standard app_commands
+    try:
+        from discord import app_commands
+        return app_commands
+    except ImportError:
+        logger.error("Failed to import discord.app_commands. This may cause issues.")
+        # Return a placeholder module as a last resort
+        class PlaceholderAppCommands:
+            pass
+        return PlaceholderAppCommands()

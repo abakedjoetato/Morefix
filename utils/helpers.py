@@ -50,7 +50,7 @@ async def safe_embed_send(ctx, embed_or_coroutine, **kwargs):
 from typing import Any, Dict, List, Optional, Union, Callable
 import discord
 from discord.ext import commands
-from discord import app_commands
+from utils.discord_patches import app_commands
 
 logger = logging.getLogger(__name__)
 

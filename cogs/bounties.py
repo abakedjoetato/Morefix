@@ -11,16 +11,15 @@ import discord
 from discord.ext import commands
 from typing import Dict, List, Optional, Union
 
-# Use our compatibility layer instead of direct imports
-from utils.app_commands_patch import command as app_commands_command
+# Use our discord_patches module for app_commands compatibility
+from utils.discord_patches import app_commands
+# Import compatibility functions for command decorators
+from utils.discord_compat import command, describe, guild_only
 
-# Create an app_commands namespace for compatibility
-class app_commands:
-    command = app_commands_command
-
-from utils.command_handlers import command_handler, db_operation
+# Import utility modules for handling commands and database operations
+from utils.command_handlers import command_handler, db_operation, defer_interaction
 from utils.safe_mongodb import SafeMongoDBResult, SafeDocument
-from utils.interaction_handlers import safely_respond_to_interaction, defer_interaction
+from utils.interaction_handlers import safely_respond_to_interaction
 
 logger = logging.getLogger(__name__)
 
@@ -39,7 +38,7 @@ class Bounties(commands.Cog):
         name="bounty",
         description="Place a bounty on a player"
     )
-    @app_commands.describe(
+    @describe(
         player_name="Name of the player to place a bounty on",
         amount="Amount of currency to offer as a bounty",
         server_id="The server ID (optional)"
@@ -108,8 +107,7 @@ class Bounties(commands.Cog):
         
         # Handle result with proper error checking
         if not bounty_result.success:
-            error = bounty_result.error()
-            error_msg = str(error) if error else "Unknown error"
+            error_msg = bounty_result.error if bounty_result.error else "Unknown error"
             logger.error(f"Error creating bounty: {error_msg}")
             await safely_respond_to_interaction(
                 interaction,
@@ -129,7 +127,7 @@ class Bounties(commands.Cog):
         name="bounties",
         description="List all active bounties"
     )
-    @app_commands.describe(
+    @describe(
         server_id="The server ID (optional)"
     )
     @command_handler(guild_only=True)
@@ -166,8 +164,7 @@ class Bounties(commands.Cog):
         
         # Handle result with proper error checking
         if not bounties_result.success:
-            error = bounties_result.error()
-            error_msg = str(error) if error else "Unknown error"
+            error_msg = bounties_result.error if bounties_result.error else "Unknown error"
             logger.error(f"Error getting bounties: {error_msg}")
             await safely_respond_to_interaction(
                 interaction,
@@ -177,7 +174,7 @@ class Bounties(commands.Cog):
             return
         
         # Extract bounties from result
-        bounties = bounties_result.data
+        bounties = bounties_result.result
         
         if not bounties or len(bounties) == 0:
             await safely_respond_to_interaction(
@@ -267,17 +264,17 @@ class Bounties(commands.Cog):
             
             # Insert using the bot's database connection
             if not hasattr(self.bot, 'db') or self.bot.db is None:
-                return SafeMongoDBResult(success=False, error_message="Database connection not available")
+                return SafeMongoDBResult.error_result("Database connection not available")
                 
             result = await self.bot.db.bounties.insert_one(bounty)
             
             # Return success result with inserted document
             bounty["_id"] = result.inserted_id
-            return SafeMongoDBResult(success=True, data=bounty)
+            return SafeMongoDBResult.success_result(bounty)
             
         except Exception as e:
             logger.error(f"Error creating bounty: {e}")
-            return SafeMongoDBResult(success=False, error_message=str(e), exception=e)
+            return SafeMongoDBResult.error_result(str(e), "create_bounty")
     
     @db_operation(collection_name="bounties")
     async def get_bounties(
@@ -311,18 +308,18 @@ class Bounties(commands.Cog):
             
             # Check database connection
             if not hasattr(self.bot, 'db') or self.bot.db is None:
-                return SafeMongoDBResult(success=False, error_message="Database connection not available")
+                return SafeMongoDBResult.error_result("Database connection not available")
             
             # Get all active bounties for this guild/server
             bounties = []
             async for doc in self.bot.db.bounties.find(query).sort("amount", -1):
                 bounties.append(SafeDocument(doc))
             
-            return SafeMongoDBResult(success=True, data=bounties)
+            return SafeMongoDBResult.success_result(bounties)
             
         except Exception as e:
             logger.error(f"Error getting bounties: {e}")
-            return SafeMongoDBResult(success=False, error_message=str(e), exception=e)
+            return SafeMongoDBResult.error_result(str(e), "get_bounties")
 
 async def setup(bot):
     await bot.add_cog(Bounties(bot))

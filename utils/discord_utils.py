@@ -8,7 +8,7 @@ and message output handling.
 
 import logging
 import discord
-from discord import app_commands
+from utils.discord_patches import app_commands
 from discord.ext import commands
 from typing import Any, Dict, List, Optional, Tuple, Union, cast
 

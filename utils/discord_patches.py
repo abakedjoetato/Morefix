@@ -1,177 +1,67 @@
 """
-Discord Compatibility Patches for py-cord 2.6.1
+Discord Patches for py-cord 2.6.1
 
-This module provides compatibility patches for py-cord 2.6.1 to make it work with
-code written for discord.py's app_commands API.
-
-Usage:
-    # Replace imports in your cogs:
-    # from discord import app_commands
-    from utils.discord_patches import app_commands
+This module provides patches and compatibility shims for using py-cord 2.6.1
+with code that expects discord.py's module structure.
 """
 
-import sys
 import logging
-import inspect
-from typing import Any, Callable, Dict, List, Optional, Type, TypeVar, Union, cast
+import sys
+from typing import Any, Dict, List, Optional, Union, Callable
 
-import discord
-from discord.ext import commands
+from utils.command_imports import import_app_commands
 
 logger = logging.getLogger(__name__)
 
-# Check if we're using py-cord or discord.py
-USING_PYCORD = False
+# Import the appropriate app_commands module based on the current library
+app_commands = import_app_commands()
+
+# Add the app_commands module to discord for import compatibility
 try:
     import discord
-    if hasattr(discord, "__version__"):
-        version = discord.__version__
-        if version.startswith("2."):
-            USING_PYCORD = True
-            logger.info(f"Detected py-cord version: {version}")
-        else:
-            logger.info(f"Detected discord.py version: {version}")
-    else:
-        logger.warning("Could not determine discord library version")
-except ImportError:
-    logger.error("Could not import discord library")
+    if not hasattr(discord, 'app_commands'):
+        setattr(discord, 'app_commands', app_commands)
+        logger.info("Successfully patched discord.app_commands")
+except ImportError as e:
+    logger.error(f"Failed to patch discord.app_commands: {e}")
 
-# Create a namespace for app_commands
-class AppCommandModule:
-    """Compatibility module for discord.py's app_commands"""
-    
-    @staticmethod
-    def command(*, name: Optional[str] = None, description: Optional[str] = None, **kwargs):
-        """
-        Command decorator compatible with both discord.py and py-cord
-        
-        Args:
-            name: Name of the command
-            description: Description of the command
-            **kwargs: Additional arguments
-            
-        Returns:
-            Command decorator
-        """
-        def decorator(func):
-            # For py-cord, we use slash_command
-            if USING_PYCORD:
-                # Handle guild_only parameter which is different in py-cord
-                if 'guild_only' in kwargs:
-                    kwargs['guild_ids'] = kwargs.pop('guild_only')
-                    
-                # Create the command
-                return commands.slash_command(
-                    name=name,
-                    description=description,
-                    **kwargs
-                )(func)
-            else:
-                # For discord.py, we would use app_commands.command
-                # (This branch won't be taken in our case)
-                return func
-                
-        return decorator
-    
-    class Choice:
-        """Choice class for application command options"""
-        
-        def __init__(self, name: str, value: Union[str, int, float]):
-            self.name = name
-            self.value = value
-            
-        def to_dict(self) -> dict:
-            return {
-                'name': self.name,
-                'value': self.value
-            }
-    
-    class Group:
-        """
-        Command group compatible with both discord.py and py-cord
-        
-        Args:
-            name: Name of the group
-            description: Description of the group
-            **kwargs: Additional arguments
-        """
-        
-        def __init__(self, *, name: Optional[str] = None, description: Optional[str] = None, **kwargs):
-            self.name = name
-            self.description = description
-            self.kwargs = kwargs
-            self.commands = []
-            
-        def command(self, *, name: Optional[str] = None, description: Optional[str] = None, **kwargs):
-            """
-            Create a command within this group
-            
-            Args:
-                name: Name of the command
-                description: Description of the command
-                **kwargs: Additional arguments
-                
-            Returns:
-                Command decorator
-            """
-            def decorator(func):
-                if USING_PYCORD:
-                    # For py-cord, we use a slash command in a group
-                    # Handle guild_only parameter
-                    if 'guild_only' in kwargs:
-                        kwargs['guild_ids'] = kwargs.pop('guild_only')
-                        
-                    # Create the command
-                    cmd = commands.slash_command(
-                        name=name or self.name,
-                        description=description or self.description,
-                        **{**self.kwargs, **kwargs}
-                    )(func)
-                    
-                    self.commands.append(cmd)
-                    return cmd
-                else:
-                    # For discord.py (not used in our case)
-                    return func
-                    
-            return decorator
-
-# Create a single instance of the app_commands module
-app_commands = AppCommandModule()
-
-# Add describe function for parameters (used in many cogs)
-def describe(**kwargs):
+class Interaction:
     """
-    Decorator to describe command parameters
+    Placeholder for direct imports of discord.Interaction
     
-    Args:
-        **kwargs: Parameter descriptions
-        
+    This helps with type annotations and imports that expect
+    discord.Interaction directly.
+    """
+    pass
+
+def patch_modules():
+    """
+    Apply patches to make py-cord 2.6.1 more compatible with discord.py code
+    
+    This function:
+    1. Patches sys.modules to make 'discord.app_commands' importable
+    2. Sets up any other necessary patches for compatibility
+    
     Returns:
-        Function decorator
+        bool: True if patches were applied, False otherwise
     """
-    def decorator(func):
-        # In py-cord, we don't need this decorator
-        # The description is already handled in the slash_command options
-        return func
-    return decorator
-
-# Add the describe function to the app_commands module
-app_commands.describe = describe
-
-# Function to check if a command is already registered
-def is_command_registered(bot, command_name):
-    """
-    Check if a command is already registered
-    
-    Args:
-        bot: Bot instance
-        command_name: Name of the command
+    try:
+        # Add app_commands to sys.modules for direct imports
+        if 'discord.app_commands' not in sys.modules:
+            sys.modules['discord.app_commands'] = app_commands
+            logger.info("Added discord.app_commands to sys.modules")
         
-    Returns:
-        bool: True if the command is registered, False otherwise
-    """
-    for command in bot.application_commands:
-        if command.name == command_name:
-            return True
-    return False
+        # Patch discord.Interaction if needed
+        if hasattr(discord, 'Interaction'):
+            # Use the actual Interaction class
+            globals()['Interaction'] = discord.Interaction
+            logger.info("Using discord.Interaction directly")
+        
+        return True
+    except Exception as e:
+        logger.error(f"Failed to apply Discord patches: {e}")
+        return False
+
+# Apply patches when the module is imported
+patch_success = patch_modules()
+logger.info(f"Discord patches applied: {patch_success}")

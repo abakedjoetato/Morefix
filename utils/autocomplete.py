@@ -8,7 +8,8 @@ import logging
 from typing import List
 
 import discord
-from discord import app_commands
+# Use our compatibility layer instead of direct import
+from utils.discord_patches import app_commands
 
 from utils.server_utils import standardize_server_id
 
@@ -67,7 +68,8 @@ server_autocomplete = server_id_autocomplete
 
 import logging
 import discord
-from discord import app_commands
+# Update to use our compatibility layer
+from utils.discord_patches import app_commands
 from discord.ext import commands
 from typing import List, Optional
 

@@ -24,7 +24,8 @@ from typing import (
 
 import discord
 from discord.ext import commands
-from discord import app_commands
+# Use our compatibility layer
+from utils.discord_patches import app_commands
 
 from config import PREMIUM_TIERS, COMMAND_PREFIX as PREFIX
 from utils.premium import (
