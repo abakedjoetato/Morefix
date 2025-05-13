@@ -1,175 +1,196 @@
 """
-Interaction handling utilities
-
-This module provides functions to handle interactions consistently across
-different Discord library versions.
+Interaction handling utilities for Discord bot cogs
 """
 
 import logging
-import inspect
-import functools
-from typing import Any, Callable, Dict, List, Optional, Union, cast
+from typing import Any, Dict, List, Optional, Union, cast
 
 import discord
-from discord import Interaction, InteractionResponse, Embed, Member, User
-
-from utils.command_imports import is_compatible_with_pycord_261
+from discord.ext import commands
 
 logger = logging.getLogger(__name__)
 
-def get_user_from_interaction(interaction: Interaction) -> Optional[Union[User, Member]]:
+async def safely_respond_to_interaction(
+    interaction: discord.Interaction, 
+    message: str, 
+    ephemeral: bool = False, 
+    embed: Optional[discord.Embed] = None
+) -> bool:
     """
-    Get the user or member who triggered the interaction
+    Safely respond to an interaction with error handling
     
     Args:
-        interaction: The Discord interaction
-        
-    Returns:
-        The user or member, or None if not found
-    """
-    # In py-cord, this is interaction.user
-    # In discord.py, might be interaction.user or interaction.author
-    
-    # Try py-cord style first
-    if hasattr(interaction, 'user') and interaction.user is not None:
-        return interaction.user
-        
-    # Try discord.py style
-    if hasattr(interaction, 'author') and interaction.author is not None:
-        return interaction.author
-        
-    # Last resort, try to get from guild
-    if hasattr(interaction, 'guild') and interaction.guild is not None and hasattr(interaction, 'user_id'):
-        return interaction.guild.get_member(interaction.user_id)
-        
-    return None
-
-def safe_interaction_response(func):
-    """
-    Decorator to safely handle interaction responses
-    
-    This handles various interaction response methods across different 
-    Discord library versions and ensures we don't try to respond multiple times.
-    
-    Args:
-        func: The function to decorate
-        
-    Returns:
-        The decorated function
-    """
-    @functools.wraps(func)
-    async def wrapper(interaction, *args, **kwargs):
-        try:
-            # Check if interaction can be responded to
-            if hasattr(interaction, 'response') and hasattr(interaction.response, 'is_done'):
-                if interaction.response.is_done():
-                    # Already responded, use followup or edit_original_response
-                    if hasattr(interaction, 'followup'):
-                        # Use followup if available (py-cord or discord.py)
-                        result = await interaction.followup.send(*args, **kwargs)
-                        return result
-                    elif hasattr(interaction, 'edit_original_response'):
-                        # Use edit if followup not available
-                        result = await interaction.edit_original_response(*args, **kwargs)
-                        return result
-                    else:
-                        logger.warning("Interaction already responded to, but no followup method available")
-                        return None
-                else:
-                    # Not responded yet, call the original function
-                    return await func(interaction, *args, **kwargs)
-            else:
-                # No way to check if responded, just try the original function
-                return await func(interaction, *args, **kwargs)
-        except Exception as e:
-            logger.error(f"Error in interaction response: {e}")
-            # Try to send a message directly if possible
-            try:
-                if hasattr(interaction, 'channel') and interaction.channel:
-                    await interaction.channel.send(f"Error processing command: {str(e)}")
-            except:
-                pass
-            return None
-    
-    return wrapper
-
-@safe_interaction_response
-async def respond_to_interaction(
-    interaction: Interaction,
-    content: Optional[str] = None,
-    embed: Optional[Embed] = None,
-    ephemeral: bool = False
-):
-    """
-    Respond to an interaction in a way that works across Discord library versions
-    
-    Args:
-        interaction: The Discord interaction
-        content: Text content to send
-        embed: Embed to send
+        interaction: The interaction to respond to
+        message: The message to send
         ephemeral: Whether the response should be ephemeral
+        embed: Optional embed to send
         
     Returns:
-        The response object
+        True if responded successfully, False otherwise
     """
     try:
-        # Check if we can defer the response first
         if not interaction.response.is_done():
-            # Respond using the library-specific method
-            if is_compatible_with_pycord_261():
-                # py-cord style
-                return await interaction.response.send_message(
-                    content=content,
-                    embed=embed,
-                    ephemeral=ephemeral
-                )
+            if embed:
+                await interaction.response.send_message(message, ephemeral=ephemeral, embed=embed)
             else:
-                # discord.py style
-                return await interaction.response.send_message(
-                    content=content,
-                    embed=embed,
-                    ephemeral=ephemeral
-                )
+                await interaction.response.send_message(message, ephemeral=ephemeral)
+            return True
         else:
-            # Already responded, use followup
-            if hasattr(interaction, 'followup'):
-                return await interaction.followup.send(
-                    content=content,
-                    embed=embed,
-                    ephemeral=ephemeral
-                )
+            if embed:
+                await interaction.followup.send(message, ephemeral=ephemeral, embed=embed)
             else:
-                logger.warning("Interaction already responded to and no followup available")
-                return None
+                await interaction.followup.send(message, ephemeral=ephemeral)
+            return True
     except Exception as e:
-        logger.error(f"Error responding to interaction: {e}")
-        # Try to send a message directly if possible
-        try:
-            if hasattr(interaction, 'channel') and interaction.channel:
-                return await interaction.channel.send(
-                    content=content,
-                    embed=embed
+        logger.error(f"Failed to respond to interaction: {e}")
+        return False
+
+def get_interaction_user(interaction: discord.Interaction) -> Optional[Union[discord.User, discord.Member]]:
+    """
+    Get the user from an interaction with proper type handling
+    
+    Args:
+        interaction: The interaction
+        
+    Returns:
+        The user or None if not found
+    """
+    # In py-cord 2.6.1, interaction.user is available but in some older versions
+    # we need to access interaction.user
+    user = getattr(interaction, "user", None)
+    if user is None:
+        # Fall back to author for older versions
+        user = getattr(interaction, "author", None)
+    
+    return user
+
+def get_interaction_user_id(interaction: discord.Interaction) -> Optional[int]:
+    """
+    Get the user ID from an interaction with proper type handling
+    
+    Args:
+        interaction: The interaction
+        
+    Returns:
+        The user ID or None if not found
+    """
+    # In py-cord 2.6.1, interaction.user.id is available but in some older versions
+    # we might need to access interaction.user_id directly
+    user_id = getattr(interaction, "user_id", None)
+    if user_id is None:
+        # Fall back to user.id
+        user = get_interaction_user(interaction)
+        if user is not None:
+            user_id = user.id
+    
+    return user_id
+
+async def send_embed_response(
+    ctx_or_interaction: Union[commands.Context, discord.Interaction],
+    title: str,
+    description: str,
+    color: Union[discord.Color, int] = discord.Color.blue(),
+    ephemeral: bool = False,
+    fields: Optional[List[Dict[str, str]]] = None
+) -> bool:
+    """
+    Send an embed response to either a context or interaction
+    
+    Args:
+        ctx_or_interaction: The context or interaction
+        title: The embed title
+        description: The embed description
+        color: The embed color
+        ephemeral: Whether the response should be ephemeral (for interactions)
+        fields: Optional list of fields to add to the embed
+        
+    Returns:
+        True if sent successfully, False otherwise
+    """
+    try:
+        embed = discord.Embed(
+            title=title,
+            description=description,
+            color=color
+        )
+        
+        if fields:
+            for field in fields:
+                embed.add_field(
+                    name=field.get("name", ""),
+                    value=field.get("value", ""),
+                    inline=field.get("inline", False)
                 )
-        except Exception as e2:
-            logger.error(f"Failed to send fallback message: {e2}")
+        
+        if isinstance(ctx_or_interaction, commands.Context):
+            await ctx_or_interaction.send(embed=embed)
+            return True
+        elif isinstance(ctx_or_interaction, discord.Interaction):
+            return await safely_respond_to_interaction(
+                ctx_or_interaction, 
+                "",  # Empty message, using embed for content
+                ephemeral=ephemeral, 
+                embed=embed
+            )
+        
+        return False
+    except Exception as e:
+        logger.error(f"Failed to send embed response: {e}")
+        return False
+
+async def send_channel_message(
+    channel: discord.abc.Messageable,
+    message: str,
+    embed: Optional[discord.Embed] = None
+) -> Optional[discord.Message]:
+    """
+    Send a message to a channel with error handling
+    
+    Args:
+        channel: The channel to send to
+        message: The message to send
+        embed: Optional embed to send
+        
+    Returns:
+        The sent message or None if failed
+    """
+    try:
+        if embed:
+            return await channel.send(message, embed=embed)
+        else:
+            return await channel.send(message)
+    except Exception as e:
+        logger.error(f"Failed to send channel message: {e}")
         return None
 
-def patch_interaction_respond():
+async def update_message(
+    message: discord.Message,
+    new_content: Optional[str] = None,
+    new_embed: Optional[discord.Embed] = None
+) -> bool:
     """
-    Patch interaction response methods to be consistent across Discord library versions
+    Update a message with error handling
     
-    This adds helper methods to the Interaction class to make it easier to respond
-    consistently regardless of which Discord library version is being used.
-    """
-    # Add our safe respond method to the Interaction class
-    if not hasattr(discord.Interaction, 'safe_respond'):
-        setattr(discord.Interaction, 'safe_respond', respond_to_interaction)
-        logger.info("Added safe_respond method to Interaction class")
+    Args:
+        message: The message to update
+        new_content: Optional new content
+        new_embed: Optional new embed
         
-    # If using py-cord 2.6.1, also patch to add some discord.py-like methods
-    if is_compatible_with_pycord_261():
-        # Add any py-cord specific patches here
-        pass
-    else:
-        # Add any discord.py specific patches here
-        pass
+    Returns:
+        True if updated successfully, False otherwise
+    """
+    try:
+        kwargs = {}
+        if new_content is not None:
+            kwargs["content"] = new_content
+        if new_embed is not None:
+            kwargs["embed"] = new_embed
+            
+        if kwargs:
+            await message.edit(**kwargs)
+            return True
+        
+        return False
+    except Exception as e:
+        logger.error(f"Failed to update message: {e}")
+        return False

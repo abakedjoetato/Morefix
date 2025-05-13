@@ -64,7 +64,7 @@ class Bounties(commands.Cog):
         if amount <= 0:
             await safely_respond_to_interaction(
                 interaction,
-                content="Bounty amount must be greater than 0.",
+                "Bounty amount must be greater than 0.",
                 ephemeral=True
             )
             return
@@ -72,7 +72,7 @@ class Bounties(commands.Cog):
         if player_name.strip() == "":
             await safely_respond_to_interaction(
                 interaction,
-                content="Please provide a valid player name.",
+                "Please provide a valid player name.",
                 ephemeral=True
             )
             return
@@ -91,7 +91,7 @@ class Bounties(commands.Cog):
         if guild_id is None or user_id is None:
             await safely_respond_to_interaction(
                 interaction,
-                content="Could not process your request. Missing guild or user information.",
+                "Could not process your request. Missing guild or user information.",
                 ephemeral=True
             )
             return
@@ -111,7 +111,7 @@ class Bounties(commands.Cog):
             logger.error(f"Error creating bounty: {error_msg}")
             await safely_respond_to_interaction(
                 interaction,
-                content=f"Failed to place bounty: {error_msg}",
+                f"Failed to place bounty: {error_msg}",
                 ephemeral=True
             )
             return
@@ -119,7 +119,7 @@ class Bounties(commands.Cog):
         # Success response
         await safely_respond_to_interaction(
             interaction,
-            content=f"Bounty of {amount} placed on {player_name}!",
+            f"Bounty of {amount} placed on {player_name}!",
             ephemeral=False
         )
     
@@ -151,7 +151,7 @@ class Bounties(commands.Cog):
         if guild_id is None:
             await safely_respond_to_interaction(
                 interaction,
-                content="Could not process your request. Missing guild information.",
+                "Could not process your request. Missing guild information.",
                 ephemeral=True
             )
             return
@@ -168,7 +168,7 @@ class Bounties(commands.Cog):
             logger.error(f"Error getting bounties: {error_msg}")
             await safely_respond_to_interaction(
                 interaction,
-                content=f"Failed to get bounties: {error_msg}",
+                f"Failed to get bounties: {error_msg}",
                 ephemeral=True
             )
             return
@@ -179,7 +179,7 @@ class Bounties(commands.Cog):
         if not bounties or len(bounties) == 0:
             await safely_respond_to_interaction(
                 interaction,
-                content="No active bounties found.",
+                "No active bounties found.",
                 ephemeral=True
             )
             return
@@ -275,7 +275,7 @@ class Bounties(commands.Cog):
             
         except Exception as e:
             logger.error(f"Error creating bounty: {e}")
-            return SafeMongoDBResult.error_result(str(e), "create_bounty")
+            return SafeMongoDBResult.error_result(str(e), None, "bounties")
     
     @command_handler(collection_name="bounties")
     @db_operation(operation_type="get_bounties")
@@ -321,7 +321,7 @@ class Bounties(commands.Cog):
             
         except Exception as e:
             logger.error(f"Error getting bounties: {e}")
-            return SafeMongoDBResult.error_result(str(e), "get_bounties")
+            return SafeMongoDBResult.error_result(str(e), None, "bounties")
 
 async def setup(bot):
     await bot.add_cog(Bounties(bot))

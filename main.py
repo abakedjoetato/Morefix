@@ -24,6 +24,12 @@ load_dotenv()
 # Apply compatibility patches for py-cord 2.6.1
 logger.info("Applying py-cord 2.6.1 compatibility patches...")
 try:
+    # Add direct import compatibility hack for cogs
+    import sys
+    import discord_app_commands
+    sys.modules['discord.app_commands'] = discord_app_commands
+    
+    # Apply all other patches
     from utils.discord_patches import patch_modules
     patch_success = patch_modules()
     logger.info(f"Discord patches applied: {patch_success}")

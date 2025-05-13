@@ -1,2 +1,2 @@
 [discord-bot]
-run = "python main.py"
+run = "python run.py"

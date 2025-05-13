@@ -15,6 +15,120 @@ from pymongo.errors import PyMongoError
 
 logger = logging.getLogger(__name__)
 
+class SafeDocument(Dict[str, Any]):
+    """
+    A wrapper around MongoDB document dictionaries with additional helper methods
+    
+    This class provides a way to work with MongoDB documents in a safer and
+    more convenient way.
+    """
+    
+    def __init__(self, data: Optional[Dict[str, Any]] = None):
+        """
+        Initialize the document
+        
+        Args:
+            data: Initial document data
+        """
+        super().__init__()
+        if data:
+            self.update(data)
+    
+    def get_id(self) -> Any:
+        """
+        Get the document ID
+        
+        Returns:
+            The document ID or None if not present
+        """
+        return self.get('_id')
+        
+    def get_str(self, key: str, default: str = "") -> str:
+        """
+        Get a string value from the document
+        
+        Args:
+            key: The key to get
+            default: Default value if key is not present or not a string
+            
+        Returns:
+            The string value or default
+        """
+        value = self.get(key)
+        if isinstance(value, str):
+            return value
+        return default
+        
+    def get_int(self, key: str, default: int = 0) -> int:
+        """
+        Get an integer value from the document
+        
+        Args:
+            key: The key to get
+            default: Default value if key is not present or not an integer
+            
+        Returns:
+            The integer value or default
+        """
+        value = self.get(key)
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            return int(value)
+        return default
+        
+    def get_bool(self, key: str, default: bool = False) -> bool:
+        """
+        Get a boolean value from the document
+        
+        Args:
+            key: The key to get
+            default: Default value if key is not present or not a boolean
+            
+        Returns:
+            The boolean value or default
+        """
+        value = self.get(key)
+        if isinstance(value, bool):
+            return value
+        return default
+        
+    def get_list(self, key: str, default: Optional[List] = None) -> List:
+        """
+        Get a list value from the document
+        
+        Args:
+            key: The key to get
+            default: Default value if key is not present or not a list
+            
+        Returns:
+            The list value or default
+        """
+        if default is None:
+            default = []
+            
+        value = self.get(key)
+        if isinstance(value, list):
+            return value
+        return default
+        
+    def get_dict(self, key: str, default: Optional[Dict] = None) -> Dict:
+        """
+        Get a dictionary value from the document
+        
+        Args:
+            key: The key to get
+            default: Default value if key is not present or not a dictionary
+            
+        Returns:
+            The dictionary value or default
+        """
+        if default is None:
+            default = {}
+            
+        value = self.get(key)
+        if isinstance(value, dict):
+            return value
+        return default
+
 # Type variable for result types
 T = TypeVar('T')
 
@@ -61,6 +175,44 @@ class SafeMongoDBResult(Generic[T]):
             The result data or None if unsuccessful
         """
         return self.data
+        
+    @classmethod
+    def success_result(cls, data: Optional[T] = None) -> 'SafeMongoDBResult[T]':
+        """
+        Create a success result
+        
+        Args:
+            data: The result data
+            
+        Returns:
+            A success result with the given data
+        """
+        return cls(success=True, data=data)
+        
+    @classmethod
+    def error_result(
+        cls, 
+        error: str, 
+        error_code: Optional[int] = None, 
+        collection_name: Optional[str] = None
+    ) -> 'SafeMongoDBResult[T]':
+        """
+        Create an error result
+        
+        Args:
+            error: Error message
+            error_code: Error code
+            collection_name: Name of the collection that was operated on
+            
+        Returns:
+            An error result with the given error message
+        """
+        return cls(
+            success=False, 
+            error=error, 
+            error_code=error_code, 
+            collection_name=collection_name
+        )
         
     def __bool__(self) -> bool:
         """

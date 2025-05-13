@@ -12,17 +12,15 @@ from typing import Any, Dict, Optional
 
 logger = logging.getLogger(__name__)
 
-# Pre-define the app_commands at module level so it can be imported
-from utils.app_commands_patch import app_commands_bridge, Choice
-
-# Create a module-like object for app_commands that can be imported directly from this module
+# Create a module-like object for app_commands that can be imported directly
+# We'll populate it in patch_app_commands() to avoid circular imports
 class AppCommandsModule:
     def __init__(self):
-        self.command = app_commands_bridge.command
-        self.describe = app_commands_bridge.describe
-        self.choices = app_commands_bridge.choices
-        self.autocomplete = app_commands_bridge.autocomplete
-        self.Choice = Choice
+        self.command = None
+        self.describe = None
+        self.choices = None
+        self.autocomplete = None
+        self.Choice = None
         
     def __repr__(self):
         return "<py-cord compatibility layer for app_commands>"
@@ -65,12 +63,31 @@ def patch_app_commands():
     Create a synthetic app_commands module in discord namespace
     """
     import discord
+    import types
     
-    # We already created the app_commands object at module level
-    # Just add it to the sys.modules and discord namespaces
+    # Import our app_commands functionality to create a proper module
+    from utils.app_commands import (
+        command, describe, choices, autocomplete, Choice
+    )
+    
+    # Populate our global app_commands object
+    app_commands.command = command
+    app_commands.describe = describe
+    app_commands.choices = choices
+    app_commands.autocomplete = autocomplete
+    app_commands.Choice = Choice
+    
+    # Create a proper module-like object that can be imported
+    app_commands_module = types.ModuleType('discord.app_commands')
+    setattr(app_commands_module, 'command', command)
+    setattr(app_commands_module, 'describe', describe)
+    setattr(app_commands_module, 'choices', choices)
+    setattr(app_commands_module, 'autocomplete', autocomplete)
+    setattr(app_commands_module, 'Choice', Choice)
+    setattr(app_commands_module, '__name__', 'discord.app_commands')
     
     # Add the synthetic module to discord
-    sys.modules['discord.app_commands'] = app_commands
+    sys.modules['discord.app_commands'] = app_commands_module
     
     # Add it to the discord namespace for direct imports
     if not hasattr(discord, 'app_commands'):
