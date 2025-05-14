@@ -1,5 +1,0 @@
-[discord_bot]
-name = "Run Discord Bot"
-description = "Start the Discord bot with py-cord 2.6.1 compatibility"
-run = "python main.py"
-environment = { PYTHONUNBUFFERED = "1" }
